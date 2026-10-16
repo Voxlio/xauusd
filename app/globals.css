@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+/* Palette: banknote-ink green base, paper text, bullion gold accent. */
+@theme {
+  --color-ink: #0f1a17;
+  --color-panel: #15231f;
+  --color-raised: #1b2c27;
+  --color-line: #2b3d37;
+  --color-paper: #ebe6d9;
+  --color-muted: #9aa89f;
+  --color-gold: #d8b45a;
+  --color-gold-bright: #ecd08a;
+  --color-gold-deep: #9c7a2c;
+  --color-buy: #6fd6a8;
+  --color-sell: #f07c6e;
+  --color-amber: #f5a524;
+}
+
+@theme inline {
+  --font-sans: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-ink);
+    color: var(--color-paper);
+    font-family: var(--font-sans);
+    font-feature-settings: "kern" 1;
+    line-height: 1.5;
+    min-height: 100dvh;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-gold-bright);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: var(--color-gold);
+    color: var(--color-ink);
+  }
+}
+
+@layer components {
+  /* Expanded width used like a refiner's hallmark stamp. */
+  .hallmark {
+    font-stretch: 125%;
+    font-variation-settings: "wdth" 125;
+    letter-spacing: 0.02em;
+  }
+
+  .num {
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+
+  /* The one metallic surface on the page: the Analyze button. */
+  .ingot {
+    background-image: linear-gradient(
+      180deg,
+      var(--color-gold-bright) 0%,
+      var(--color-gold) 45%,
+      var(--color-gold-deep) 100%
+    );
+  }
+
+  .progress-run {
+    animation: progress-fill 8s cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+  }
+}
+
+@keyframes progress-fill {
+  from {
+    transform: scaleX(0.04);
+  }
+  to {
+    transform: scaleX(0.94);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-run {
+    animation: none;
+    transform: scaleX(0.6);
+  }
+}
