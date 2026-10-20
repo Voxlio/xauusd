@@ -64,7 +64,7 @@ export default function SignalApp() {
     <div className="mx-auto flex min-h-dvh w-full max-w-6xl flex-col px-4 pt-6 sm:px-6 lg:px-8 lg:pt-10">
       <header className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3 border-b border-line pb-5">
   <div>
-    <h1 className="hallmark text-[length:clamp(2.75rem,12vw,5rem)] font-extrabold leading-[0.95] gold-shimmer">XAU/USD</h1>
+    <h1 className="hallmark text-[length:clamp(2.75rem,12vw,5rem)] font-extrabold leading-[0.95] gold-shimmer">ZINAFX</h1>
     <p className="mt-2 text-[15px] text-muted">Gold spot vs US Dollar</p>
     <Link href="/market" className="mt-2 inline-block text-[14px] text-muted hover:text-paper">
       Live market →
@@ -135,7 +135,7 @@ export default function SignalApp() {
         </aside>
       </div>
 
-      <footer className="mt-10 border-t border-line py-5 text-[13px] text-muted">{DISCLAIMER}</footer>
+      <footer className="mt-10 border-t border-line py-5 text-[13px] text-muted">Built by Mazard. Copyright © {new Date().getFullYear()}.</footer>
     </div>
   );
 }
