@@ -12,6 +12,8 @@ import AnalyzeButton from "./AnalyzeButton";
 import HistoryPanel from "./HistoryPanel";
 import ModeToggle from "./ModeToggle";
 import ResultCard from "./ResultCard";
+import GoldPriceWidget from "./GoldPriceWidget";
+import Link from "next/link";
 
 /** Client-side ceiling; the server answers within ~9 s. */
 const CLIENT_TIMEOUT_MS = 20_000;
@@ -60,21 +62,33 @@ export default function SignalApp() {
 
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-6xl flex-col px-4 pt-6 sm:px-6 lg:px-8 lg:pt-10">
-      <header className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3 border-b border-line pb-5">
-        <div>
-          <h1 className="hallmark text-[length:clamp(2.75rem,12vw,5rem)] font-extrabold leading-[0.95] text-paper">XAU/USD</h1>
-          <p className="mt-2 text-[15px] text-muted">Gold spot vs US Dollar</p>
-        </div>
-        {result && (
-          <div className="text-left sm:text-right">
-            <p className="num text-2xl font-semibold text-paper sm:text-3xl">{formatPrice(result.snapshot.price)}</p>
-            <p className="text-[12px] text-muted">
-              Close of the {result.snapshot.priceTimeframe} candle opened{" "}
-              <time dateTime={result.snapshot.priceTime}>{formatUtc(Date.parse(result.snapshot.priceTime))}</time>
-            </p>
-          </div>
-        )}
-      </header>
+      <header className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3 border-b border-line pb-5">
+  <div>
+    <h1 className="hallmark text-[length:clamp(2.75rem,12vw,5rem)] font-extrabold leading-[0.95] gold-shimmer">XAU/USD</h1>
+    <p className="mt-2 text-[15px] text-muted">Gold spot vs US Dollar</p>
+    <Link href="/market" className="mt-2 inline-block text-[14px] text-muted hover:text-paper">
+      Live market →
+    </Link>
+  </div>
+
+  <div className="flex flex-col items-start gap-3 sm:items-end">
+    <div className="w-[340px] max-w-full overflow-hidden rounded-xl [color-scheme:light]">
+      <div className="-m-[2px]">
+        <GoldPriceWidget />
+      </div>
+    </div>
+
+    {result && (
+      <div className="text-left sm:text-right">
+        <p className="num text-2xl font-semibold text-paper sm:text-3xl">{formatPrice(result.snapshot.price)}</p>
+        <p className="text-[12px] text-muted">
+          Close of the {result.snapshot.priceTimeframe} candle opened{" "}
+          <time dateTime={result.snapshot.priceTime}>{formatUtc(Date.parse(result.snapshot.priceTime))}</time>
+        </p>
+      </div>
+    )}
+  </div>
+</header>
 
       <div className="mt-6 grid flex-1 items-start gap-8 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <main className="min-w-0 space-y-5">

@@ -73,6 +73,23 @@
   }
 }
 
+/* Gold shine that slides across text (used on the page title). */
+  .gold-shimmer {
+    background-image: linear-gradient(
+      90deg,
+      var(--color-gold-deep),
+      var(--color-gold),
+      var(--color-gold-bright),
+      var(--color-gold),
+      var(--color-gold-deep)
+    );
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: gold-shimmer 4s linear infinite;
+  }
+
 @keyframes progress-fill {
   from {
     transform: scaleX(0.04);
@@ -82,9 +99,19 @@
   }
 }
 
+@keyframes gold-shimmer {
+  to {
+    background-position: 200% center;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .progress-run {
     animation: none;
     transform: scaleX(0.6);
   }
 }
+
+.gold-shimmer {
+    animation: none;
+  }
