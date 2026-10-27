@@ -124,6 +124,14 @@ export interface CalendarSummary {
 
 export type EntryType = "market" | "limit" | "stop";
 
+export type SmcVerdict = "agree" | "neutral" | "against" | "unavailable";
+
+export interface SmcPenaltyDetail {
+  code: "zone" | "choch" | "sweep" | "fvg" | "sma";
+  penalty: number;
+  message: string;
+}
+
 export interface ValidatedSignal {
   bias: Bias;
   /** 0-100 after code adjustments; null when there is no trade. */
@@ -149,6 +157,9 @@ export interface ValidatedSignal {
   warnings: string[];
   /** "ai" when the model was consulted, "rules" when a hard gate decided without it. */
   decidedBy: "ai" | "rules";
+  /** SMC-lite filter verdict; added without changing required response schema. */
+  smcVerdict?: SmcVerdict;
+  smcPenalties?: SmcPenaltyDetail[];
 }
 
 export type DataState = "fresh" | "cache" | "stale" | "missing";
@@ -174,6 +185,8 @@ export interface SignalSnapshot {
   macro: MacroSummary;
   calendar: CalendarSummary;
   dataStatus: DataStatusItem[];
+  /** Compact SMC structure facts for UI and history (optional for backwards compat). */
+  structure?: Record<string, unknown> | null;
 }
 
 export interface SignalResponse {

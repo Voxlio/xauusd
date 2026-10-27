@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/indicators.test.ts tests/technicals.test.ts tests/fundamentals.test.ts tests/data.test.ts tests/cache.test.ts tests/providers.test.ts tests/parse.test.ts tests/validate.test.ts tests/request.test.ts tests/service.test.ts tests/handler.test.ts tests/history.test.ts tests/client.test.ts tests/marketHours.test.ts tests/meta.test.ts",
+    "test": "tsx --test tests/indicators.test.ts tests/technicals.test.ts tests/fundamentals.test.ts tests/data.test.ts tests/cache.test.ts tests/providers.test.ts tests/parse.test.ts tests/validate.test.ts tests/request.test.ts tests/service.test.ts tests/handler.test.ts tests/history.test.ts tests/client.test.ts tests/marketHours.test.ts tests/meta.test.ts tests/smc.test.ts",
     "check": "npm run typecheck && npm run lint && npm test && npm run build"
   },
   "dependencies": {

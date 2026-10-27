@@ -4,6 +4,7 @@ import { formatUtc } from "@/lib/time";
 import type { Bias, SignalResponse, ValidatedSignal } from "@/lib/types";
 import LevelLadder from "./LevelLadder";
 import SnapshotDetails from "./SnapshotDetails";
+import StructureChecks from "./StructureChecks";
 
 const BIAS_TEXT: Record<Bias, string> = { BUY: "BUY", SELL: "SELL", NO_TRADE: "NO TRADE" };
 const BIAS_STYLE: Record<Bias, string> = {
@@ -178,6 +179,8 @@ export default function ResultCard({ data, dimmed }: { data: SignalResponse; dim
         <Bullets title="Technicals" items={s.technicalReasons} />
         <Bullets title="Fundamentals" items={s.fundamentalReasons} />
       </div>
+
+      <StructureChecks data={data} />
 
       <section className="border-l-2 border-gold pl-3">
         <h3 className="text-sm font-semibold text-paper">Invalidation</h3>

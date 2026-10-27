@@ -1,187 +1,116 @@
-# XAUUSD Signal
+# XAUUSD Signal — Educational Gold Trade Signals (SMC-lite filters)
 
-An educational trade-signal app for **XAU/USD (spot gold)**, built for practice on a **demo account**. Press **Analyze XAUUSD** and you get a bias (BUY / SELL / NO TRADE) with entry, stop loss, two take-profits and risk:reward, or a clear reason not to trade.
+Educational XAU/USD (spot gold) signal app for **demo accounts only**. Multi-timeframe technicals (M15/H1/H4 for Day, H4/D1/W1 for Swing), US 10Y real yields + broad dollar (FRED), and the high-impact USD calendar (Finnhub → ForexFactory fallback) are computed **in code**. An LLM is used only for synthesis; every price the model proposes is validated server-side against hard risk rules before it reaches you.
 
-> **Educational use only. Not financial advice. Test on a demo account.**
+> **Not financial advice.** Test on a demo account.
 
 ## How it works
 
-```
-Analyze ──► POST /api/signal {mode}
-              │
-              ├─ fetch in parallel (timeouts, 60 s cache, stale fallback)
-              │    Twelve Data  XAU/USD candles (3 timeframes)
-              │    FRED         10Y real yield (DFII10) + broad dollar index (DTWEXBGS)
-              │    Finnhub      high-impact USD events, 48 h  ──► ForexFactory fallback
-              │
-              ├─ technicals in TypeScript (lib/indicators.ts, lib/technicals.ts)
-              │    EMA 20/50/200, RSI 14, MACD 12/26/9, ATR 14, swings, S/R, trend
-              │
-              ├─ hard gates: market closed? stale prices? calendar missing? USD news within 3 h? ──► NO TRADE
-              │
-              ├─ AI gets a compact JSON summary (no raw candles) and must reply with JSON only
-              │
-              └─ validate and correct every number in code ──► signal + indicator snapshot
-```
+1. **Fetch** — Twelve Data candles (3 timeframes), FRED macro series, and the calendar in parallel, each cached and counted against the 9 s budget.
+2. **Technicals in code** — EMA 20/50/200, RSI 14, MACD, ATR 14, swing points, clustered support/resistance, structure (`higher-highs-lows` / `lower-highs-lows` / `mixed`), and a per-timeframe trend vote (`classifyTrend`).
+3. **Hard gates** — market open (New York hours + stale-candle check), calendar `strict` vs `warn`, and a 3-hour high-impact news block. A failing gate returns `NO_TRADE` without calling the AI.
+4. **AI synthesis** — the model sees only the code-computed snapshot (no raw candles) and must return a single JSON object `{bias, confidence, entry, stopLoss, takeProfit1, takeProfit2, technicalReasons, fundamentalReasons, invalidation, newsWarning}`. See `lib/ai/prompt.ts` for the exact system prompt and risk frame.
+5. **Validation** — `lib/signal/validate.ts` checks entry within 0.5 × ATR, stop 1–2.5 × ATR beyond a swing, TP1 ≥ 1.5 R, TP2 ≥ 2.5 R, correct ordering, and a minimum confidence of 40. Numbers are corrected when possible (tightened stop, moved TPs), otherwise the idea is rejected as `NO_TRADE`.
+6. **SMC-lite / SMA filter (optional, after validation)** — purely **confidence penalties** derived locally from the same candles (see below). Never creates a trade; only lowers confidence or turns a weak setup into `NO_TRADE`.
 
-| Mode  | Trigger | Setup (ATR source) | Trend |
-| ----- | ------- | ------------------ | ----- |
-| Day   | M15     | H1                 | H4    |
-| Swing | H4      | D1                 | W1    |
+All I/O is injected (`lib/server/handler.ts` → `lib/signal/service.ts`), so the whole pipeline is testable offline.
 
-### Risk rules enforced in code (`lib/signal/validate.ts`)
+## Structure checks (SMC-lite + SMA) — what each check means
 
-The model only proposes. Every number shown to you is checked or recomputed:
+These are **unvalidated heuristics** — useful context, not proven edges. Defaults are starting points, not tuned numbers. SMC-lite never opens or reverses a trade on its own.
 
-| Rule | What happens if the model breaks it |
-| --- | --- |
-| Entry within **0.5× ATR** of the current price | NO TRADE |
-| Stop **1× to 2.5× ATR** from entry | widened or tightened to the limit |
-| Stop **beyond the nearest swing** low/high (+0.1× ATR buffer) | moved beyond it; NO TRADE if that needs more than 2.5× ATR |
-| TP1 **≥ 1.5R**, TP2 **≥ 2.5R** (and ≥ TP1 + 0.5R) | extended; capped at 6R / 10R |
-| Levels on the wrong side, missing, or >15% from price | NO TRADE |
-| High-impact USD event from 15 min ago to **3 h ahead** | NO TRADE (checked before and after the AI) |
-| No calendar source could be loaded | NO TRADE with `NEWS_GATE=strict` (default); −10 confidence with `NEWS_GATE=warn` |
-| Gold market closed (Fri 17:00 to Sun 18:00 New York, daily 17:00–18:00 break) or the newest candle is stale | NO TRADE, AI not called |
-| Confidence below 40 after penalties (counter-trend −15, macro against −10, no trend timeframe −10, no calendar −10) | NO TRADE |
-| Unparseable AI reply, AI timeout | NO TRADE, no AI numbers used |
+| Check | Plain words | When it fires | Default penalty |
+|---|---|---|---|
+| **Dealing range / zone** | Where price sits inside the last confirmed swing high–low on the setup timeframe (Day: H1, Swing: D1). `discount` ≤ 35 %, `premium` ≥ 65 %, else `equilibrium`. Equilibrium = 50 %. | Selling while in `discount`, or buying while in `premium` | `SMC_PEN_ZONE=10` |
+| **Break of structure (BOS)** | A close beyond the last confirmed swing high (bullish) or low (bearish) **in the direction of the current trend**. | Shown in the `structure` block; used as *agree* signal for the dot (no penalty). | — |
+| **Change of character (CHoCH)** | The first close **against** the prevailing structure (downtrend of lower highs/lows → close above the last lower high = bullish CHoCH; mirror for uptrends). | Opposite CHoCH within the last 10 candles of the setup timeframe | `SMC_PEN_CHOCH=15` |
+| **Liquidity sweep** | Within the last 6 candles, a wick pierces the last swing high/low by more than 0.1 × ATR and then **closes back inside**. | Sweep that favours the opposite side | `SMC_PEN_SWEEP=10` |
+| **Fair value gaps (FVG)** | Three-candle imbalance: bullish if `candle1.high < candle3.low`, bearish if `candle1.low > candle3.high`, over the last 60 candles. Only unfilled gaps kept (no later candle traded through them), nearest on each side within 3 × ATR. | An unfilled FVG sits between entry and TP1 (likely obstacle) | `SMC_PEN_FVG=5` |
+| **SMA context** | SMA 50 and SMA 200 on the trend timeframe (Day: H4, Swing: W1 if available else D1): price above/below each, and any golden/death cross in the last 20 candles. | Price on the wrong side of SMA 200 | `SMC_PEN_SMA=5` |
 
-A final invariant check re-verifies every published BUY/SELL; a 4,000-case fuzz test confirms no published signal breaks a rule.
+Agreement never raises confidence. Penalties stack; if confidence drops below 40 the signal becomes `NO_TRADE` (same existing rule). Every applied penalty is recorded in plain English in the existing `corrections`/`warnings` arrays so you can see why confidence was lowered. The `structure` block is also shown to the model with the instruction: *“Use only the provided structure facts; never invent order blocks, FVGs, or liquidity levels. If the structure block is missing or null, ignore structure.”*
 
-## API keys you need
+### Display
 
-| Service | Needed? | Free tier | Get a key |
-| --- | --- | --- | --- |
-| **Twelve Data** | Required | Basic: 8 requests/min, 800/day | https://twelvedata.com/pricing |
-| **Anthropic** | Required (default AI) | Paid per token; Haiku is cheap | https://console.anthropic.com/settings/keys |
-| **FRED** | Recommended | Free | https://fredaccount.stlouisfed.org/apikeys |
-| **Finnhub** | Optional | Free key, but the economic calendar is often premium (HTTP 403) | https://finnhub.io/register |
+- A **Structure checks** box on the signal card lists one plain-English line per fact with a coloured dot: green = agrees with the proposed side, grey = neutral, red = against. Hidden when SMC is unavailable or disabled; mobile layout preserved.
+- **Signal history** stores `smcVerdict` (`agree` | `neutral` | `against` | `unavailable`) and the applied penalties per entry; the panel shows the verdict beside each row and lets you filter by it. History is localStorage-backed and survives reloads. If a journal integration (`lib/journal.ts` / `sendToJournal`) exists, the two fields are included in its payload automatically (the project currently has no journal integration, so this is a no-op).
 
-Without Finnhub access the app uses the free ForexFactory weekly calendar automatically. If neither calendar loads, the app returns NO TRADE (set `NEWS_GATE=warn` to change that). Without FRED, fundamentals are limited to the calendar.
+### Data reuse & latency
 
-Each analysis uses 3 Twelve Data requests (cached for 60 s), so the free plan allows about 2 fresh analyses per minute.
-
-## Local setup
-
-Requires **Node.js 20.9 or newer** (22 LTS recommended).
-
-```bash
-npm install
-cp .env.example .env.local        # Windows (cmd): copy .env.example .env.local
-# edit .env.local and add TWELVE_DATA_API_KEY, ANTHROPIC_API_KEY, FRED_API_KEY (and FINNHUB_API_KEY if you have one)
-npm run dev
-```
-
-Open http://localhost:3000.
-
-| Command | What it does |
-| --- | --- |
-| `npm run dev` | Development server |
-| `npm test` | Unit tests (indicators, validation, data parsers, API handler, history) — no keys or network needed |
-| `npm run typecheck` | TypeScript check |
-| `npm run lint` | ESLint |
-| `npm run build` | Production build |
-| `npm run check` | All of the above in order |
-
-Quick API test while `npm run dev` is running:
-
-```bash
-curl -s -X POST http://localhost:3000/api/signal -H "content-type: application/json" -d '{"mode":"day"}'
-```
-
-## Deploy to Vercel (free Hobby plan)
-
-1. Push this folder to a GitHub repository (`.env.local` is git-ignored, so keys stay local).
-2. In Vercel, choose **Add New → Project** and import the repository. The framework is detected as Next.js; keep the defaults.
-3. Under **Environment Variables**, add the variables from the table below (at least `TWELVE_DATA_API_KEY` and `ANTHROPIC_API_KEY`).
-4. Click **Deploy**. Changing variables later needs a redeploy (**Deployments → ⋯ → Redeploy**).
-
-With the Vercel CLI instead: `npm i -g vercel`, then `vercel`, add each key with `vercel env add NAME`, and `vercel --prod`.
-
-The app uses one serverless function (`/api/signal`, Node.js runtime, `maxDuration = 10`), no database and no paid Vercel features.
+All SMC-lite math is **local** and reuses the candles already fetched for technicals. No new data providers and no extra Twelve Data requests — only the candle count for H4/D1 may be raised inside the same `time_series` request if SMA 200 needs more history. Total function time stays under the existing 10 s budget (`BUDGET.totalMs = 9 s`).
 
 ## Environment variables
 
-All are server-side only (no `NEXT_PUBLIC_` prefix), so they never reach the browser.
+Copy `.env.example` → `.env.local`. All keys are read server-side only (no `NEXT_PUBLIC_` prefix).
 
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `TWELVE_DATA_API_KEY` | Yes | — | XAU/USD candles |
-| `ANTHROPIC_API_KEY` | When `AI_PROVIDER=anthropic` | — | Anthropic API key |
-| `OPENAI_API_KEY` | When `AI_PROVIDER=openai` | — | OpenAI or OpenAI-compatible key |
-| `FRED_API_KEY` | No | — | Real yield and dollar index |
-| `FINNHUB_API_KEY` | No | — | Economic calendar (premium on many keys) |
-| `CALENDAR_FALLBACK` | No | `forexfactory` | `forexfactory` or `none` |
-| `NEWS_GATE` | No | `strict` | `strict`: NO TRADE when no calendar loads. `warn`: allow trades with a warning and −10 confidence |
-| `AI_PROVIDER` | No | `anthropic` | `anthropic` or `openai` |
-| `AI_MODEL` | No | `claude-haiku-5-5` / `gpt-4.1-mini` | Model ID for the chosen provider |
-| `AI_BASE_URL` | No | provider default | HTTPS base URL for OpenAI-compatible hosts (Groq, OpenRouter, …) or an Anthropic proxy |
-| `AI_THINKING` | No | `off` | Anthropic only. `off` disables extended thinking for speed; `auto` uses the model default (slower) |
-| `CACHE_TTL_SECONDS` | No | `60` | In-memory cache for macro data, 5–300. Candles are capped at 120 s so prices stay current |
-| `RATE_LIMIT_PER_MINUTE` | No | `10` | Analyses per IP per minute, per server instance, 1–120 |
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `TWELVE_DATA_API_KEY` | yes | — | Twelve Data free Basic plan |
+| `FRED_API_KEY` | no | — | Free FRED key; without it macro tilt is `unknown` |
+| `FINNHUB_API_KEY` | no | — | Free Finnhub key; without it the app tries the ForexFactory fallback |
+| `CALENDAR_FALLBACK` | no | `forexfactory` | `forexfactory` or `none` |
+| `NEWS_GATE` | no | `strict` | `strict` = `NO_TRADE` when no calendar loads; `warn` = trade with warning and −10 confidence |
+| `AI_PROVIDER` | no | `anthropic` | `anthropic` or `openai` (any OpenAI-compatible host via `AI_BASE_URL`) |
+| `AI_MODEL` | no | `claude-haiku-5-5` / `gpt-4.1-mini` | Must match `^[A-Za-z0-9._:/@-]{1,120}$` |
+| `ANTHROPIC_API_KEY` | if anthropic | — |  |
+| `OPENAI_API_KEY` | if openai | — |  |
+| `AI_BASE_URL` | no | provider default | Must be https (http allowed only for localhost) |
+| `AI_THINKING` | no | `off` | Anthropic only: `off` disables thinking (fast), `auto` leaves model default |
+| `CACHE_TTL_SECONDS` | no | `90` | 5–300 s for macro; candles capped at 120 s regardless |
+| `RATE_LIMIT_PER_MINUTE` | no | `30` | 1–120 per IP per instance |
+| **`SMC_ENABLED`** | no | `true` | Master switch. `false` leaves signals exactly unchanged (useful for A/B) |
+| **`SMC_HARD_BLOCK`** | no | `false` | When `true`, selling deep in discount (≤ 20 %) or buying deep in premium (≥ 80 %) **with** an opposite CHoCH becomes `NO_TRADE` with a clear reason, instead of just a penalty |
+| `SMC_PEN_ZONE` | no | `10` | Penalty for selling in discount / buying in premium |
+| `SMC_PEN_CHOCH` | no | `15` | Opposite CHoCH within last 10 candles |
+| `SMC_PEN_SWEEP` | no | `10` | Opposite-side sweep within last 6 |
+| `SMC_PEN_FVG` | no | `5` | Unfilled FVG between entry and TP1 |
+| `SMC_PEN_SMA` | no | `5` | Price on wrong side of SMA 200 |
+| `SMC_ZONE_DISCOUNT` | no | `35` | ≤ this % is discount |
+| `SMC_ZONE_PREMIUM` | no | `65` | ≥ this % is premium |
+| `SMC_SWEEP_WINDOW` | no | `6` | Lookback (candles) for sweep |
+| `SMC_SWEEP_ATR_MULT` | no | `0.1` | Wick must exceed this × ATR |
+| `SMC_FVG_WINDOW` | no | `60` | Scan window (candles) for FVGs |
+| `SMC_FVG_ATR` | no | `3` | Keep only FVGs within this × ATR |
+| `SMC_CROSS_WINDOW` | no | `20` | Lookback for SMA golden/death cross |
+| `SMC_CHOCH_WINDOW` | no | `10` | “Opposite CHoCH within N candles” |
+| `SMC_HARD_BLOCK_ZONE` | no | `20` | Deepest percentile for hard block (20 = ≤ 20 % or ≥ 80 %) |
 
-### Switching the AI model
-
-The AI sits behind a small interface (`lib/ai/provider.ts`) with two implementations:
-
-- **Anthropic** (default): `AI_PROVIDER=anthropic`, `AI_MODEL=claude-haiku-5-5` (fast enough for the 10 s budget). Larger models such as `claude-sonnet-5-5` can be slower than the time budget allows.
-- **OpenAI-compatible**: `AI_PROVIDER=openai`, `AI_MODEL=gpt-4.1-mini`, and optionally `AI_BASE_URL` (for example `https://api.groq.com/openai/v1`). It uses Chat Completions with JSON mode and `max_completion_tokens`. Prefer non-reasoning models: reasoning tokens use up the output limit and the 10 s budget.
-
-Adding another vendor means one file that implements `complete({ system, user, maxTokens, timeoutMs })`.
+All `SMC_*` thresholds and penalties are defined in `lib/smc/config.ts` (single config file) and overridable by env. Missing history (SMA 50 needs 50 closes, SMA 200 needs 200) is marked `unavailable` and skipped silently. Integer penalties are clamped to ≥ 0.
 
 ## API
 
-`POST /api/signal` with `Content-Type: application/json` and body `{"mode":"day"}` or `{"mode":"swing"}`. Any other field, type or value is rejected.
+`POST /api/signal` with `{"mode":"day"}` or `{"mode":"swing"}`. Response is `SignalResponse` (`lib/types.ts`): `signal` (validated, SMC-filtered), `snapshot` (technicals + macro + calendar + `structure` block), `meta` (provider, model, durations). `structure` and `signal.smcVerdict` / `signal.smcPenalties` are optional for backwards compat. `GET` is rejected (405).
 
-**200** returns `{ signal, snapshot, meta }`:
+## Development
 
-- `signal`: `bias`, `confidence`, `entry`, `entryType` (market / limit / stop), `stopLoss`, `takeProfit1`, `takeProfit2`, `riskReward1`, `riskReward2`, `riskUsd`, `stopAtr`, `technicalReasons[]`, `fundamentalReasons[]`, `invalidation`, `newsWarning`, `noTradeReasons[]`, `corrections[]`, `warnings[]`, `decidedBy` (`ai` or `rules`)
-- `snapshot`: price, ATR, per-timeframe indicators and levels, macro readings, 48 h calendar, and the status of each data source
-- `meta`: provider, model, durations
+Prerequisites: Node ≥ 20.9, `.env.local` with at least `TWELVE_DATA_API_KEY` and one AI key.
 
-**Errors** return `{ error: { code, message, hint } }`:
-
-| Status | Codes |
-| --- | --- |
-| 400 | `INVALID_JSON`, `INVALID_BODY`, `MISSING_MODE`, `INVALID_MODE`, `UNKNOWN_FIELD` |
-| 403 | `FORBIDDEN_ORIGIN` (cross-site browser request) |
-| 405 / 413 / 415 | wrong method, body over 1 KB, wrong content type |
-| 429 | `RATE_LIMITED` (with `Retry-After`) |
-| 500 | `CONFIG_MISSING`, `CONFIG_INVALID`, `INTERNAL_ERROR` |
-| 502 | `MARKET_DATA_UNAVAILABLE`, `INSUFFICIENT_DATA`, `AI_CONFIG` |
-
-## Project structure
-
+```bash
+npm install
+npm run typecheck   # tsc --noEmit
+npm run lint        # eslint .
+npm test            # tsx --test tests/*.test.ts (including smc.test.ts)
+npm run build       # next build
+npm run check       # typecheck + lint + test + build
 ```
-app/
-  api/signal/route.ts     POST handler (delegates to lib/server/handler.ts)
-  layout.tsx, page.tsx    Page shell and font
-  globals.css             Tailwind v4 theme
-components/               SignalApp, ModeToggle, AnalyzeButton, ResultCard, LevelLadder,
-                          SnapshotDetails, HistoryPanel
-lib/
-  indicators.ts           EMA, RSI, MACD, ATR, swings, structure, S/R, trend (pure)
-  technicals.ts           Per-timeframe snapshot and multi-timeframe summary (pure)
-  fundamentals.ts         Macro tilt, 48 h calendar window, 3 h news gate (pure)
-  marketHours.ts          Spot gold session in New York time, DST aware (pure)
-  data/                   Twelve Data, FRED and calendar clients
-  ai/                     Provider interface, Anthropic, OpenAI-compatible, prompt
-  signal/                 parse, validate, gates, levels, request, service (the pipeline)
-  server/                 env, cache, http, errors, rate limit, handler
-  history.ts              History stats and storage format (pure)
-  historyStore.ts         localStorage binding for React
-  clientApi.ts            Browser call to the API
-tests/                    node:test suites run with tsx
-```
+
+Tests are pure (no network): `tests/helpers.ts` builds candles from closes or high/low pairs, `tests/fakes.ts` scripts fetch, `tests/market.ts` aggregates M15 → H1/H4 and fakes Twelve Data/FRED/Finnhub payloads. SMC tests in `tests/smc.test.ts` cover premium/discount boundaries (35/65), BOS vs CHoCH in uptrend/downtrend, sweep that closes back inside vs beyond (not a sweep), FVG detection and filled gap, SMA cross and unavailable cases, penalty stacking and the below-40 `NO_TRADE` case, `SMC_ENABLED=false` leaving signals unchanged, and `SMC_HARD_BLOCK` behaviour.
 
 ## Limitations
 
-- **Educational tool.** Signals are rule-checked, not back-tested. No edge is claimed. Use a demo account.
-- **Data delays.** Free Twelve Data quotes can be delayed. The latest candle is still forming, so indicators move until it closes.
-- **Market hours.** The app knows the weekly close (Friday 17:00 to Sunday 18:00 New York) and the daily 17:00–18:00 break, but not exchange holidays. On holidays the stale-candle check usually catches the closed market.
-- **Macro lag.** FRED series are daily and published with a lag of one or more days. They describe the backdrop, not intraday moves.
-- **Calendar coverage.** The ForexFactory fallback is an unofficial feed covering the current week only, so on Fridays it can miss Monday's events. Check a calendar yourself before trading.
-- **Per-instance state.** The cache and rate limiter live in memory per serverless instance; they reset on cold starts and are not shared between instances.
-- **History is local.** Signal history lives in this browser's localStorage. Clearing site data deletes it, and it doesn't sync across devices. "TP hit" counts as TP1 reached.
-- **AI variability.** The same data can produce different reasons or a different bias between runs. Only the levels are guaranteed to follow the rules.
-- **Time budget.** The function aims to finish in under 9 s. If data sources are slow, the AI step is skipped and you get NO TRADE with the reason.
+- SMC-lite checks are **unvalidated heuristics** with arbitrary defaults. They have not been back-tested; treat them as context, not a strategy.
+- Timeframes and swing detection use a simple fractal pivot (`SWING_STRENGTH` 3 on H1/H4/M15, 2 on D1/W1); different strength or instrument would give different swings.
+- Market-hours gate uses New York time and a fixed 90 min stale-candle rule; holidays beyond weekends are not modelled.
+- The LLM can still hallucinate reasons; prices and risk rules are always enforced in code, and confidence is lowered for conflicts the model may have glossed over.
+
+## Project layout
+
+- `app/` — Next.js App Router (`page.tsx`, `market/page.tsx`, `api/signal/route.ts`)
+- `lib/config.ts`, `lib/indicators.ts`, `lib/technicals.ts`, `lib/num.ts` — domain config & pure math
+- `lib/data/` — Twelve Data / FRED / calendar clients
+- `lib/ai/` — provider abstraction + prompt
+- `lib/signal/` — `facts.ts`, `gates.ts`, `levels.ts`, `parse.ts`, `validate.ts`, `service.ts` (pipeline)
+- `lib/smc/` — `config.ts`, `range.ts`, `structure.ts`, `sweep.ts`, `fvg.ts`, `sma.ts`, `index.ts`, `filter.ts` (SMC-lite, pure, no I/O)
+- `lib/history.ts` / `lib/historyStore.ts` / `components/HistoryPanel.tsx` — browser history
+- `components/` — `SignalApp.tsx`, `ResultCard.tsx`, `StructureChecks.tsx`, `SnapshotDetails.tsx`, etc.
+- `tests/` — offline unit tests (`*.test.ts`)

@@ -11,6 +11,7 @@ export const MAX_OUTPUT_TOKENS = 1000;
 
 export const SYSTEM_PROMPT = `You are a disciplined XAU/USD (spot gold) analyst producing one educational trade idea for a demo account.
 You receive a JSON summary computed by code: multi-timeframe technicals, US real yield and dollar data, and the high-impact USD calendar. Use only this data. Do not invent prices, levels, events or news.
+Use only the provided structure facts; never invent order blocks, FVGs, or liquidity levels. If the structure block is missing or null, ignore structure.
 
 How to decide BUY, SELL or NO_TRADE:
 - The trend timeframe sets the preferred direction, the setup timeframe defines structure and levels, the trigger timeframe times the entry.
@@ -64,7 +65,13 @@ const STYLE: Record<Mode, string> = {
   swing: "swing, held for days to a few weeks",
 };
 
-export function buildUserPayload(tech: TechnicalSummary, macro: MacroSummary, calendar: CalendarSummary, now: number) {
+export function buildUserPayload(
+  tech: TechnicalSummary,
+  macro: MacroSummary,
+  calendar: CalendarSummary,
+  now: number,
+  structure: Record<string, unknown> | null = null,
+) {
   const range = entryRange(tech);
   return {
     instrument: "XAU/USD spot gold",
@@ -99,6 +106,7 @@ export function buildUserPayload(tech: TechnicalSummary, macro: MacroSummary, ca
       supports: t.supports.map((l) => ({ price: l.price, touches: l.touches })),
       resistances: t.resistances.map((l) => ({ price: l.price, touches: l.touches })),
     })),
+    structure,
     macro: {
       codeTilt: macro.tilt,
       realYield10y: seriesBrief(macro.realYield),
@@ -118,8 +126,14 @@ export function buildUserPayload(tech: TechnicalSummary, macro: MacroSummary, ca
   };
 }
 
-export function buildUserPrompt(tech: TechnicalSummary, macro: MacroSummary, calendar: CalendarSummary, now: number): string {
+export function buildUserPrompt(
+  tech: TechnicalSummary,
+  macro: MacroSummary,
+  calendar: CalendarSummary,
+  now: number,
+  structure: Record<string, unknown> | null = null,
+): string {
   return `Analyze this XAU/USD snapshot and reply with the JSON object only.\n${JSON.stringify(
-    buildUserPayload(tech, macro, calendar, now),
+    buildUserPayload(tech, macro, calendar, now, structure),
   )}`;
 }

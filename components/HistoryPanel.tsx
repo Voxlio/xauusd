@@ -1,6 +1,6 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 import {
   historyStats,
   realizedR,
@@ -14,12 +14,26 @@ import {
 } from "@/lib/history";
 import { getHistorySnapshot, getServerHistorySnapshot, isMemoryOnly, subscribeHistory, updateHistory } from "@/lib/historyStore";
 import { formatPrice } from "@/lib/num";
+import type { SmcVerdict } from "@/lib/types";
 
 const RESULT_ACTIVE: Record<TradeResult, string> = {
   open: "bg-raised text-paper",
   tp: "bg-buy text-ink",
   sl: "bg-sell text-ink",
   skipped: "bg-paper/20 text-paper",
+};
+
+const VERDICT_LABEL: Record<SmcVerdict, string> = {
+  agree: "Agree",
+  neutral: "Neutral",
+  against: "Against",
+  unavailable: "n/a",
+};
+const VERDICT_TONE: Record<SmcVerdict, string> = {
+  agree: "text-buy",
+  neutral: "text-muted",
+  against: "text-sell",
+  unavailable: "text-muted",
 };
 
 function signedR(r: number): string {
@@ -43,6 +57,7 @@ function Stat({ label, value, detail }: { label: string; value: string; detail?:
 function HistoryRow({ entry }: { entry: HistoryEntry }) {
   const r = realizedR(entry);
   const label = `${entry.bias} signal from ${when(entry.createdAt)}`;
+  const verdict = (entry.smcVerdict ?? "unavailable") as SmcVerdict;
   return (
     <li className="py-3">
       <div className="flex items-baseline justify-between gap-2">
@@ -65,6 +80,12 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
           <dd className="text-paper">{formatPrice(entry.takeProfit1)}</dd>
         </div>
       </dl>
+      <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+        <span className={VERDICT_TONE[verdict]}>SMC: {VERDICT_LABEL[verdict]}</span>
+        {entry.smcPenalties && entry.smcPenalties.length > 0 && (
+          <span className="text-muted">({entry.smcPenalties.map((p) => `−${p.penalty}`).join(", ")})</span>
+        )}
+      </div>
       <div className="mt-2 flex items-center gap-2">
         <div role="group" aria-label={`Result for ${label}`} className="flex flex-1 gap-1 rounded-md bg-ink/60 p-0.5">
           {RESULTS.map((res) => (
@@ -100,6 +121,8 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
 export default function HistoryPanel() {
   const history = useSyncExternalStore(subscribeHistory, getHistorySnapshot, getServerHistorySnapshot);
   const stats = historyStats(history);
+  const [filter, setFilter] = useState<SmcVerdict | "all">("all");
+  const filtered = filter === "all" ? history : history.filter((e) => (e.smcVerdict ?? "unavailable") === filter);
 
   const clearAll = () => {
     if (window.confirm("Delete all saved signals from this browser?")) updateHistory(() => []);
@@ -127,6 +150,22 @@ export default function HistoryPanel() {
         A TP hit counts as TP1 reached and an SL hit as −1R. Open and skipped signals are left out.
       </p>
 
+      {history.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1">
+          {(["all", "agree", "neutral", "against", "unavailable"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-pressed={filter === v}
+              onClick={() => setFilter(v)}
+              className={`rounded px-2 py-1 text-[11px] font-medium ${filter === v ? "bg-raised text-paper" : "bg-ink/60 text-muted hover:text-paper"}`}
+            >
+              {v === "all" ? "All" : VERDICT_LABEL[v as SmcVerdict]}
+            </button>
+          ))}
+        </div>
+      )}
+
       {isMemoryOnly() && (
         <p className="mt-2 rounded bg-amber/15 px-2 py-1.5 text-[12px] text-amber">
           Browser storage is unavailable, so history only lasts until this tab closes.
@@ -137,9 +176,11 @@ export default function HistoryPanel() {
         <p className="mt-4 border-t border-line pt-4 text-[14px] leading-snug text-muted">
           BUY and SELL signals are saved here. Mark each one as TP hit, SL hit or Skipped to track your win rate.
         </p>
+      ) : filtered.length === 0 ? (
+        <p className="mt-4 border-t border-line pt-4 text-[14px] text-muted">No signals match the selected filter.</p>
       ) : (
         <ol className="mt-3 max-h-[70vh] divide-y divide-line overflow-y-auto border-t border-line lg:max-h-[calc(100dvh-16rem)]">
-          {history.map((e) => (
+          {filtered.map((e) => (
             <HistoryRow key={e.id} entry={e} />
           ))}
         </ol>

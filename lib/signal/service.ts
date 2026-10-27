@@ -1,6 +1,6 @@
 /**
  * The analysis pipeline behind POST /api/signal:
- * fetch (parallel, cached) -> technicals in code -> hard gates -> AI -> validate.
+ * fetch (parallel, cached) -> technicals in code -> hard gates -> AI -> validate -> SMC filter.
  * All I/O is injected so the whole flow is testable offline (tests/service.test.ts).
  */
 import { MAX_OUTPUT_TOKENS, SYSTEM_PROMPT, buildUserPrompt } from "../ai/prompt";
@@ -17,6 +17,8 @@ import type { ServerConfig } from "../server/env";
 import { AppError, errorMessage, UpstreamError } from "../server/errors";
 import type { FetchLike } from "../server/http";
 import { InsufficientDataError, buildTechnicals } from "../technicals";
+import { buildSmcSnapshot, smcToAiBlock } from "../smc";
+import { applySmcFilter } from "../smc/filter";
 import type { Candle, DataStatusItem, MacroSeries, Mode, SignalResponse, Timeframe, ValidatedSignal } from "../types";
 import { preTradeGates } from "./gates";
 import { ModelOutputError, parseModelSignal } from "./parse";
@@ -117,6 +119,10 @@ export async function generateSignal(mode: Mode, deps: ServiceDeps): Promise<Sig
   const tech = technicals.summary;
   const warnings = [...technicals.warnings];
 
+  // 2b. SMC-lite snapshot (from same candles, no extra requests; pure local math)
+  const smcSnapshot = buildSmcSnapshot(mode, candles, tech.price);
+  const structureBlock = smcToAiBlock(smcSnapshot);
+
   // 3. Fundamentals in code.
   const macroValue = (r: PromiseSettledResult<CacheResult<MacroSeries>>) => (r.status === "fulfilled" ? r.value.value : null);
   const macro = summarizeMacro(macroValue(macroResults[0]), macroValue(macroResults[1]));
@@ -144,6 +150,9 @@ export async function generateSignal(mode: Mode, deps: ServiceDeps): Promise<Sig
 
   if (gateReasons.length > 0) {
     signal = noTradeSignal({ ctx: signalCtx, reasons: gateReasons, decidedBy: "rules" });
+    // Tag NO_TRADE with SMC verdict as well (filters must not create trades, but we still tag)
+    const filtered = applySmcFilter(signal, smcSnapshot);
+    signal = filtered.signal;
   } else {
     const remaining = BUDGET.totalMs - (clock() - startedAt) - RESPONSE_MARGIN_MS;
     if (remaining < BUDGET.aiMinMs) {
@@ -152,18 +161,23 @@ export async function generateSignal(mode: Mode, deps: ServiceDeps): Promise<Sig
         reasons: ["The data sources were slow, leaving too little time for the AI step. Try again."],
         decidedBy: "rules",
       });
+      const filtered = applySmcFilter(signal, smcSnapshot);
+      signal = filtered.signal;
     } else {
       // 5. AI synthesis, then 6. validation of every number.
       const aiStart = clock();
       try {
         const text = await deps.provider.complete({
           system: SYSTEM_PROMPT,
-          user: buildUserPrompt(tech, macro, calendar, now),
+          user: buildUserPrompt(tech, macro, calendar, now, structureBlock),
           maxTokens: MAX_OUTPUT_TOKENS,
           timeoutMs: Math.min(BUDGET.aiMaxMs, remaining),
         });
         aiDurationMs = clock() - aiStart;
         signal = validateSignal(parseModelSignal(text), signalCtx);
+        // 6b. SMC filter: confidence-only penalties after validation (FILTERS ONLY)
+        const filtered = applySmcFilter(signal, smcSnapshot);
+        signal = filtered.signal;
       } catch (error) {
         aiDurationMs = clock() - aiStart;
         if (error instanceof AIError && (error.kind === "auth" || error.kind === "model_not_found" || error.kind === "bad_request")) {
@@ -182,12 +196,16 @@ export async function generateSignal(mode: Mode, deps: ServiceDeps): Promise<Sig
         }
         if (error instanceof AIError) {
           signal = noTradeSignal({ ctx: signalCtx, reasons: [`AI analysis unavailable: ${error.message}.`], decidedBy: "rules" });
+          const filtered = applySmcFilter(signal, smcSnapshot);
+          signal = filtered.signal;
         } else if (error instanceof ModelOutputError) {
           signal = noTradeSignal({
             ctx: signalCtx,
             reasons: [`${error.message} No AI levels were used.`],
             decidedBy: "rules",
           });
+          const filtered = applySmcFilter(signal, smcSnapshot);
+          signal = filtered.signal;
         } else {
           throw error;
         }
@@ -212,6 +230,7 @@ export async function generateSignal(mode: Mode, deps: ServiceDeps): Promise<Sig
       macro,
       calendar,
       dataStatus,
+      structure: structureBlock,
     },
     meta: {
       provider: deps.provider.name,

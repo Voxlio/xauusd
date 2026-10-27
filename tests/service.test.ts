@@ -94,7 +94,8 @@ describe("generateSignal", () => {
     const res = await generateSignal("day", lenient.deps);
     assert.equal(lenient.ai.calls.length, 1);
     assert.equal(res.signal.bias, "BUY");
-    assert.equal(res.signal.confidence, 58);
+    // 68 base -10 (calendar unavailable in validate) -10 (SMC zone premium on synthetic candles) = 48
+    assert.equal(res.signal.confidence, 48);
     assert.match(res.signal.newsWarning ?? "", /unavailable/);
   });
 

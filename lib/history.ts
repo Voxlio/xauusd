@@ -3,7 +3,7 @@
  * the React binding lives in historyStore.ts. Tested in tests/history.test.ts.
  */
 import { round } from "./num";
-import type { Mode, SignalResponse } from "./types";
+import type { Mode, SignalResponse, SmcVerdict } from "./types";
 
 export type TradeResult = "open" | "tp" | "sl" | "skipped";
 
@@ -30,6 +30,8 @@ export interface HistoryEntry {
   takeProfit2: number;
   confidence: number | null;
   result: TradeResult;
+  smcVerdict?: SmcVerdict;
+  smcPenalties?: Array<{ code: string; penalty: number; message: string }>;
 }
 
 function isPrice(v: unknown): v is number {
@@ -58,6 +60,8 @@ export function entryFromResponse(res: SignalResponse, id: string): HistoryEntry
     takeProfit2: s.takeProfit2,
     confidence: s.confidence,
     result: "open",
+    smcVerdict: s.smcVerdict ?? "unavailable",
+    smcPenalties: s.smcPenalties ?? [],
   };
   return ordered(entry) ? entry : null;
 }
@@ -73,6 +77,8 @@ function parseEntry(v: unknown): HistoryEntry | null {
   const result = RESULTS.includes(o.result as TradeResult) ? (o.result as TradeResult) : "open";
   const confidence =
     typeof o.confidence === "number" && Number.isFinite(o.confidence) ? Math.min(100, Math.max(0, o.confidence)) : null;
+  const verdictRaw = typeof o.smcVerdict === "string" ? o.smcVerdict : "unavailable";
+  const verdict: SmcVerdict = ["agree", "neutral", "against", "unavailable"].includes(verdictRaw) ? (verdictRaw as SmcVerdict) : "unavailable";
   const entry: HistoryEntry = {
     id: o.id,
     createdAt: o.createdAt,
@@ -84,6 +90,8 @@ function parseEntry(v: unknown): HistoryEntry | null {
     takeProfit2: o.takeProfit2,
     confidence,
     result,
+    smcVerdict: verdict,
+    smcPenalties: Array.isArray(o.smcPenalties) ? (o.smcPenalties as HistoryEntry["smcPenalties"]) : [],
   };
   return ordered(entry) ? entry : null;
 }

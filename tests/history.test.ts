@@ -27,6 +27,8 @@ function entry(partial: Partial<HistoryEntry> = {}): HistoryEntry {
     takeProfit2: 2425,
     confidence: 60,
     result: "open",
+    smcVerdict: "unavailable",
+    smcPenalties: [],
     ...partial,
   };
 }
