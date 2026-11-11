@@ -14,7 +14,7 @@ export interface GateInput {
   /** Cache state of the candles that supplied the current price. */
   priceState: "fresh" | "cache" | "stale";
   priceError: string | null;
-  /** "strict": no calendar means no trade, because the 3-hour news rule cannot be checked. */
+  /** "strict": no calendar means no trade, because the 30-minute news rule cannot be checked. */
   newsGate: NewsGate;
 }
 
@@ -43,12 +43,12 @@ export function preTradeGates({ tech, calendar, now, priceState, priceError, new
 
   if (calendar.source === "unavailable" && newsGate === "strict") {
     reasons.push(
-      "The economic calendar could not be loaded, so the 3-hour news rule cannot be checked. Set NEWS_GATE=warn to allow trades anyway.",
+      "The economic calendar could not be loaded, so the 30-minute news rule cannot be checked. Set NEWS_GATE=warn to allow trades anyway.",
     );
   }
 
   for (const e of blockingEvents(calendar.events, now).slice(0, 3)) {
-    reasons.push(`High-impact USD event within 3 hours: ${describeEvent(e, now)}.`);
+    reasons.push(`High-impact USD event within 30 minutes: ${describeEvent(e, now)}.`);
   }
   return reasons;
 }

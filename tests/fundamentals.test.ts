@@ -59,46 +59,45 @@ describe("summarizeMacro", () => {
 });
 
 describe("calendar window and news gate", () => {
+  const M = 60_000;
   const events = [
     event("Old news", -2 * HOUR),
-    event("Just released", -10 * 60_000),
-    event("CPI m/m", 2 * HOUR + 59 * 60_000),
-    event("CPI m/m", 2 * HOUR + 59 * 60_000),
-    event("FOMC Statement", 30 * HOUR),
-    event("Too far", 49 * HOUR),
+    event("Just released", -10 * M),
+    event("CPI m/m", 25 * M),
+    event("CPI m/m", 25 * M),
+    event("FOMC Statement", 2 * HOUR),
+    event("Too far", 30 * HOUR),
   ];
 
-  test("keeps 15 min back to 48h ahead, de-duplicated and sorted", () => {
+  test("keeps 15 min back to 30 min ahead, de-duplicated and sorted", () => {
     const c = summarizeCalendar(events, now, "finnhub", null);
     assert.deepEqual(
       c.events.map((e) => e.title),
-      ["Just released", "CPI m/m", "FOMC Statement"],
-    );
-  });
-
-  test("blocks within 3 hours ahead and 15 minutes after a release", () => {
-    const c = summarizeCalendar(events, now, "finnhub", null);
-    assert.deepEqual(
-      blockingEvents(c.events, now).map((e) => e.title),
       ["Just released", "CPI m/m"],
     );
-    assert.deepEqual(blockingEvents([event("Later", 3 * HOUR + 60_000)], now), []);
-    assert.equal(blockingEvents([event("Edge", 3 * HOUR)], now).length, 1);
   });
 
-  test("warning text: blocking, upcoming, clear and unavailable", () => {
-    const blocking = summarizeCalendar([event("CPI m/m", HOUR)], now, "finnhub", null);
-    assert.match(newsWarningText(blocking, now) ?? "", /within 3 hours.*CPI m\/m in 1h 00m.*No new trades/);
+  test("blocks within 30 minutes ahead and 15 minutes after a release", () => {
+    const c = summarizeCalendar([...events, event("Soon", 10 * M)], now, "finnhub", null);
+    assert.deepEqual(
+      blockingEvents(c.events, now).map((e) => e.title),
+      ["Just released", "Soon", "CPI m/m"],
+    );
+    assert.deepEqual(blockingEvents([event("Later", 30 * M + 60_000)], now), []);
+    assert.equal(blockingEvents([event("Edge", 30 * M)], now).length, 1);
+    assert.equal(blockingEvents([event("CPI m/m", 10 * M)], now).length, 1);
+  });
 
-    const upcoming = summarizeCalendar([event("FOMC", 20 * HOUR)], now, "finnhub", null);
-    assert.match(newsWarningText(upcoming, now) ?? "", /next 48h: FOMC in 20h 00m/);
+  test("warning text: blocking, clear and unavailable", () => {
+    const blocking = summarizeCalendar([event("CPI m/m", 10 * M)], now, "finnhub", null);
+    assert.match(newsWarningText(blocking, now) ?? "", /within 30 minutes.*CPI m\/m in 10m.*No new trades/);
 
     assert.equal(newsWarningText(summarizeCalendar([], now, "finnhub", null), now), null);
     assert.match(newsWarningText(summarizeCalendar([], now, "unavailable", "down"), now) ?? "", /unavailable/);
   });
 
   test("fundamental facts mention the next event", () => {
-    const facts = fundamentalFacts(summarizeMacro(null, null), summarizeCalendar([event("NFP", 5 * HOUR)], now, "finnhub", null), now);
-    assert.match(facts[facts.length - 1], /Next high-impact USD event: NFP in 5h 00m/);
+    const facts = fundamentalFacts(summarizeMacro(null, null), summarizeCalendar([event("NFP", 25 * 60_000)], now, "finnhub", null), now);
+    assert.match(facts[facts.length - 1], /Next high-impact USD event: NFP in 25m/);
   });
 });

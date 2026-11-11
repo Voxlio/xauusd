@@ -8,7 +8,7 @@ Educational XAU/USD (spot gold) signal app for **demo accounts only**. Multi-tim
 
 1. **Fetch** — Twelve Data candles (3 timeframes), FRED macro series, and the calendar in parallel, each cached and counted against the 9 s budget.
 2. **Technicals in code** — EMA 20/50/200, RSI 14, MACD, ATR 14, swing points, clustered support/resistance, structure (`higher-highs-lows` / `lower-highs-lows` / `mixed`), and a per-timeframe trend vote (`classifyTrend`).
-3. **Hard gates** — market open (New York hours + stale-candle check), calendar `strict` vs `warn`, and a 3-hour high-impact news block. A failing gate returns `NO_TRADE` without calling the AI.
+3. **Hard gates** — market open (New York hours + stale-candle check), calendar `strict` vs `warn`, and a 30-minute high-impact news block (15 minutes after a release). A failing gate returns `NO_TRADE` without calling the AI.
 4. **AI synthesis** — the model sees only the code-computed snapshot (no raw candles) and must return a single JSON object `{bias, confidence, entry, stopLoss, takeProfit1, takeProfit2, technicalReasons, fundamentalReasons, invalidation, newsWarning}`. See `lib/ai/prompt.ts` for the exact system prompt and risk frame.
 5. **Validation** — `lib/signal/validate.ts` checks entry within 0.5 × ATR, stop 1–2.5 × ATR beyond a swing, TP1 ≥ 1.5 R, TP2 ≥ 2.5 R, correct ordering, and a minimum confidence of 40. Numbers are corrected when possible (tightened stop, moved TPs), otherwise the idea is rejected as `NO_TRADE`.
 6. **SMC-lite / SMA filter (optional, after validation)** — purely **confidence penalties** derived locally from the same candles (see below). Never creates a trade; only lowers confidence or turns a weak setup into `NO_TRADE`.
@@ -81,6 +81,33 @@ All `SMC_*` thresholds and penalties are defined in `lib/smc/config.ts` (single 
 
 `POST /api/signal` with `{"mode":"day"}` or `{"mode":"swing"}`. Response is `SignalResponse` (`lib/types.ts`): `signal` (validated, SMC-filtered), `snapshot` (technicals + macro + calendar + `structure` block), `meta` (provider, model, durations). `structure` and `signal.smcVerdict` / `signal.smcPenalties` are optional for backwards compat. `GET` is rejected (405).
 
+## Alerts (Telegram)
+
+A scheduled scan runs the same pipeline as `POST /api/signal` and sends a Telegram message when it finds a good idea. `POST /api/signal` itself is unchanged.
+
+**How it works.** GitHub Actions (`.github/workflows/scan.yml`) calls `POST /api/cron/scan?mode=day` every 15 minutes and `?mode=swing` hourly, Monday to Friday, with `Authorization: Bearer <CRON_SECRET>`. The route:
+
+1. checks the secret (timing-safe; with no `CRON_SECRET` set it rejects everything, `GET` returns 405);
+2. skips for free when spot gold is closed, or outside London + New York hours (07:00-20:00 UTC weekdays) when `ALERT_SESSIONS_ONLY=true`;
+3. runs the pipeline. A code-only pre-check skips the AI call when a hard gate already says NO TRADE or the per-timeframe trend votes are fully mixed (up votes equal down votes);
+4. sends an alert only when the side is BUY or SELL, confidence is at least `ALERT_MIN_CONFIDENCE`, and the SMC verdict is not `against`;
+5. applies a cooldown per mode and side (`ALERT_COOLDOWN_HOURS`), unless the new entry differs from the last alerted entry by more than 1 x ATR;
+6. takes a short Redis lock (`SET NX`, 120 s) so two overlapping runs cannot both send, sends the message, and records `alert:last:<mode>:<side>`.
+
+If Redis is not configured or unreachable the scan sends nothing and returns 503 (fails closed, so you never get spam). The response JSON is `{"status":"sent"|"skipped"|"error", ...}` and never contains secrets.
+
+**Set up**
+
+1. In Telegram, message **@BotFather**, send `/newbot`, and copy the token into `TELEGRAM_BOT_TOKEN`.
+2. Send any message to your new bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `message.chat.id` into `TELEGRAM_CHAT_ID`.
+3. Generate the shared secret: `openssl rand -hex 32` and use it as `CRON_SECRET`.
+4. Add a free Upstash Redis database (Vercel > Storage > Upstash, or upstash.com). Either `KV_REST_API_URL` / `KV_REST_API_TOKEN` or `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` works.
+5. **Vercel env vars**: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CRON_SECRET`, the Redis pair, optionally `ALERT_MIN_CONFIDENCE`, `ALERT_COOLDOWN_HOURS`, `ALERT_SESSIONS_ONLY`, plus the existing Twelve Data / AI keys. Redeploy.
+6. **GitHub repository secrets** (Settings > Secrets and variables > Actions): `APP_URL` (e.g. `https://your-app.vercel.app`, no trailing slash) and `CRON_SECRET` (same value as in Vercel).
+7. Test: Actions > "Signal scan" > Run workflow, or `curl -X POST "$APP_URL/api/cron/scan?mode=day" -H "Authorization: Bearer $CRON_SECRET"`.
+
+**Twelve Data credits.** Every scan that gets past the free checks uses 3 requests (one per timeframe), exactly like one analysis. Day mode every 15 minutes is 96 scans a day (288 requests) and swing hourly is 24 scans a day (72 requests), so at most about 360 requests per weekday if nothing is skipped. The free Basic plan allows 8 requests a minute and 800 a day, so the schedule above fits, but running the app manually at the same time can hit the per-minute limit; the :05 swing scan never overlaps a :00/:15/:30/:45 day scan. Weekend and out-of-session scans cost nothing. Use `ALERT_SESSIONS_ONLY=true` to cut usage further. Each alert also costs one AI call.
+
 ## Development
 
 Prerequisites: Node ≥ 20.9, `.env.local` with at least `TWELVE_DATA_API_KEY` and one AI key.
@@ -110,6 +137,7 @@ Tests are pure (no network): `tests/helpers.ts` builds candles from closes or hi
 - `lib/data/` — Twelve Data / FRED / calendar clients
 - `lib/ai/` — provider abstraction + prompt
 - `lib/signal/` — `facts.ts`, `gates.ts`, `levels.ts`, `parse.ts`, `validate.ts`, `service.ts` (pipeline)
+- `lib/alerts/` — `rules.ts` (pure alert rules), `telegram.ts`, `store.ts` (Redis REST + in-memory fake), `scan.ts` (cron handler); `app/api/cron/scan/route.ts`
 - `lib/smc/` — `config.ts`, `range.ts`, `structure.ts`, `sweep.ts`, `fvg.ts`, `sma.ts`, `index.ts`, `filter.ts` (SMC-lite, pure, no I/O)
 - `lib/history.ts` / `lib/historyStore.ts` / `components/HistoryPanel.tsx` — browser history
 - `components/` — `SignalApp.tsx`, `ResultCard.tsx`, `StructureChecks.tsx`, `SnapshotDetails.tsx`, etc.

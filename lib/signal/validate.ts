@@ -124,7 +124,7 @@ export function validateSignal(model: ModelSignal, ctx: SignalContext): Validate
   // The news gate is re-checked here so validateSignal is safe on its own.
   const blocking = blockingEvents(calendar.events, now);
   if (blocking.length > 0) {
-    return reject(blocking.slice(0, 3).map((e) => `High-impact USD event within 3 hours: ${describeEvent(e, now)}.`));
+    return reject(blocking.slice(0, 3).map((e) => `High-impact USD event within 30 minutes: ${describeEvent(e, now)}.`));
   }
 
   if (model.bias === "NO_TRADE") {

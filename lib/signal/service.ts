@@ -19,7 +19,7 @@ import type { FetchLike } from "../server/http";
 import { InsufficientDataError, buildTechnicals } from "../technicals";
 import { buildSmcSnapshot, smcToAiBlock } from "../smc";
 import { applySmcFilter } from "../smc/filter";
-import type { Candle, DataStatusItem, MacroSeries, Mode, SignalResponse, Timeframe, ValidatedSignal } from "../types";
+import type { Candle, DataStatusItem, MacroSeries, Mode, SignalResponse, TechnicalSummary, Timeframe, ValidatedSignal } from "../types";
 import { preTradeGates } from "./gates";
 import { ModelOutputError, parseModelSignal } from "./parse";
 import { noTradeSignal, validateSignal, type SignalContext } from "./validate";
@@ -36,6 +36,11 @@ export interface ServiceDeps {
   now?: () => number;
   /** Clock used for the time budget (defaults to Date.now). */
   clock?: () => number;
+  /**
+   * Optional code-only pre-check run after the hard gates and before the AI call.
+   * Return a reason to skip the AI (the result is then a rules-decided NO TRADE). Used by the cron scan only.
+   */
+  skipAi?: (tech: TechnicalSummary) => string | null;
 }
 
 function statusItem<T>(name: string, result: PromiseSettledResult<CacheResult<T>>): DataStatusItem {
@@ -144,6 +149,10 @@ export async function generateSignal(mode: Mode, deps: ServiceDeps): Promise<Sig
     priceError: priceResult.status === "fulfilled" ? priceResult.value.error : null,
     newsGate: deps.config.newsGate,
   });
+  if (gateReasons.length === 0 && deps.skipAi) {
+    const skipReason = deps.skipAi(tech);
+    if (skipReason) gateReasons.push(skipReason);
+  }
 
   let signal: ValidatedSignal;
   let aiDurationMs: number | null = null;

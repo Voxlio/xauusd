@@ -118,3 +118,54 @@ export function readConfig(env: Env = process.env): ServerConfig {
     rateLimitPerMinute: integer(env, "RATE_LIMIT_PER_MINUTE", 10, 1, 120),
   };
 }
+
+/** Settings for the Telegram alert scan (POST /api/cron/scan). Read separately so /api/signal never depends on them. */
+export interface AlertConfig {
+  /** Shared secret for the scheduler; when null the cron endpoint rejects everything. */
+  cronSecret: string | null;
+  telegramToken: string | null;
+  telegramChatId: string | null;
+  minConfidence: number;
+  cooldownHours: number;
+  sessionsOnly: boolean;
+  /** Upstash Redis REST endpoint (KV_REST_API_* or UPSTASH_REDIS_REST_*). */
+  redisUrl: string | null;
+  redisToken: string | null;
+}
+
+function boolean(env: Env, name: string, fallback: boolean): boolean {
+  const v = value(env, name);
+  if (v === null) return fallback;
+  const lower = v.toLowerCase();
+  if (lower === "true") return true;
+  if (lower === "false") return false;
+  throw new AppError(500, "CONFIG_INVALID", `${name} must be "true" or "false".`, ENV_HINT);
+}
+
+export function readAlertConfig(env: Env = process.env): AlertConfig {
+  const redisUrl = value(env, "KV_REST_API_URL") ?? value(env, "UPSTASH_REDIS_REST_URL");
+  const redisToken = value(env, "KV_REST_API_TOKEN") ?? value(env, "UPSTASH_REDIS_REST_TOKEN");
+  if (redisUrl !== null) {
+    let url: URL;
+    try {
+      url = new URL(redisUrl);
+    } catch {
+      throw new AppError(500, "CONFIG_INVALID", "The Redis REST URL is not a valid URL.", ENV_HINT);
+    }
+    if (url.protocol !== "https:") throw new AppError(500, "CONFIG_INVALID", "The Redis REST URL must use https.", ENV_HINT);
+  }
+  const chatId = value(env, "TELEGRAM_CHAT_ID");
+  if (chatId !== null && !/^-?\d{1,20}$|^@[A-Za-z0-9_]{4,64}$/.test(chatId)) {
+    throw new AppError(500, "CONFIG_INVALID", "TELEGRAM_CHAT_ID must be a numeric chat id or an @channelname.", ENV_HINT);
+  }
+  return {
+    cronSecret: value(env, "CRON_SECRET"),
+    telegramToken: value(env, "TELEGRAM_BOT_TOKEN"),
+    telegramChatId: chatId,
+    minConfidence: integer(env, "ALERT_MIN_CONFIDENCE", 60, 0, 100),
+    cooldownHours: integer(env, "ALERT_COOLDOWN_HOURS", 3, 1, 72),
+    sessionsOnly: boolean(env, "ALERT_SESSIONS_ONLY", false),
+    redisUrl,
+    redisToken,
+  };
+}

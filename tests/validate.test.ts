@@ -273,18 +273,12 @@ describe("validateSignal: entry and targets", () => {
 });
 
 describe("validateSignal: news, model NO TRADE and confidence", () => {
-  test("high-impact USD event within 3 hours forces NO TRADE", () => {
-    const s = validateSignal(model(), ctxFor(techFixture(), { events: [event("CPI m/m", 2 * HOUR)] }));
+  test("high-impact USD event within 30 minutes forces NO TRADE", () => {
+    const s = validateSignal(model(), ctxFor(techFixture(), { events: [event("CPI m/m", 10 * 60_000)] }));
     assert.equal(s.bias, "NO_TRADE");
-    assert.match(s.noTradeReasons[0], /CPI m\/m in 2h 00m/);
-    assert.match(s.newsWarning ?? "", /within 3 hours/);
+    assert.match(s.noTradeReasons[0], /CPI m\/m in 10m/);
+    assert.match(s.newsWarning ?? "", /within 30 minutes/);
     assert.equal(s.entry, null);
-  });
-
-  test("an event 4 hours out only warns", () => {
-    const s = validateSignal(model(), ctxFor(techFixture(), { events: [event("FOMC", 4 * HOUR)] }));
-    assert.equal(s.bias, "BUY");
-    assert.match(s.newsWarning ?? "", /next 48h: FOMC in 4h 00m/);
   });
 
   test("model NO_TRADE is passed through with its reasons", () => {
@@ -361,9 +355,9 @@ describe("pre-trade gates", () => {
     assert.match(reasons[0], /could not be refreshed \(rate limit\)/);
   });
 
-  test("news within 3 hours blocks", () => {
-    const busy = summarizeCalendar([event("NFP", HOUR)], NOW, "finnhub", null);
-    assert.match(gate({ calendar: busy, priceState: "cache" })[0], /NFP in 1h 00m/);
+  test("news within 30 minutes blocks", () => {
+    const busy = summarizeCalendar([event("NFP", 10 * 60_000)], NOW, "finnhub", null);
+    assert.match(gate({ calendar: busy, priceState: "cache" })[0], /NFP in 10m/);
   });
 
   test("no calendar: strict blocks, warn allows", () => {

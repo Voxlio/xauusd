@@ -44,9 +44,9 @@ export const RULES = {
   tp2GapR: 0.5,
   tp1MaxR: 6,
   tp2MaxR: 10,
-  newsBlockAheadMs: 3 * 60 * 60_000,
+  newsBlockAheadMs: 30 * 60_000,
   newsBlockBehindMs: 15 * 60_000,
-  newsWindowMs: 48 * 60 * 60_000,
+  newsWindowMs: 30 * 60_000,
   minConfidence: 40,
   /** If the newest trigger candle is older than this, the market is treated as closed. */
   marketClosedAfterMs: 90 * 60_000,

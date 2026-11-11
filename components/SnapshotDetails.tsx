@@ -99,7 +99,7 @@ export default function SnapshotDetails({ snapshot }: { snapshot: SignalSnapshot
             </ul>
           </section>
           <section>
-            <h4 className="text-[13px] font-semibold text-paper">High-impact USD events, next 48h</h4>
+            <h4 className="text-[13px] font-semibold text-paper">High-impact USD events, next 30 min</h4>
             {calendar.events.length === 0 ? (
               <p className="mt-1 text-[13px] text-muted">
                 {calendar.source === "unavailable" ? "Calendar unavailable." : "None scheduled."}
