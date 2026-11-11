@@ -66,23 +66,15 @@ describe("generateSignal", () => {
     assert.equal(calls.length, after, "no new upstream requests");
   });
 
-  test("high-impact USD news within 30 minutes: NO TRADE without calling the AI", async () => {
-    const { deps, ai } = setup({ events: [{ event: "CPI m/m", time: MARKET_NOW + 20 * 60_000 }] });
+  test("high-impact USD news within 3 hours: NO TRADE without calling the AI", async () => {
+    const { deps, ai } = setup({ events: [{ event: "CPI m/m", time: MARKET_NOW + 2 * HOUR }] });
     const res = await generateSignal("day", deps);
     assert.equal(ai.calls.length, 0);
     assert.equal(res.signal.bias, "NO_TRADE");
     assert.equal(res.signal.decidedBy, "rules");
     assert.match(res.signal.noTradeReasons.join(" "), /CPI m\/m/);
-    assert.match(res.signal.newsWarning ?? "", /within 30 minutes/);
+    assert.match(res.signal.newsWarning ?? "", /within 3 hours/);
     assert.ok(res.signal.technicalReasons.length > 0, "code-generated technicals are still shown");
-  });
-
-  test("high-impact USD news 2 hours away does not block: AI is called once", async () => {
-    const { deps, ai } = setup({ events: [{ event: "CPI m/m", time: MARKET_NOW + 2 * HOUR }] });
-    const res = await generateSignal("day", deps);
-    assert.equal(ai.calls.length, 1);
-    assert.equal(res.signal.decidedBy, "ai");
-    assert.equal(res.signal.newsWarning, null);
   });
 
   test("market closed (weekend): NO TRADE without calling the AI", async () => {

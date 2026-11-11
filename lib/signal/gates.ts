@@ -48,7 +48,7 @@ export function preTradeGates({ tech, calendar, now, priceState, priceError, new
   }
 
   for (const e of blockingEvents(calendar.events, now).slice(0, 3)) {
-    reasons.push(`High-impact USD event within 30 minutes: ${describeEvent(e, now)}.`);
+    reasons.push(`High-impact USD event within 3 hours: ${describeEvent(e, now)}.`);
   }
   return reasons;
 }

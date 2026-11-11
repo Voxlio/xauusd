@@ -29,7 +29,7 @@ Reply with ONLY one JSON object. No markdown, no code fences, no text before or 
 - When bias is NO_TRADE, set all four prices to null and explain why in the reasons.
 - 2 to 4 technicalReasons and 1 to 3 fundamentalReasons, each under 140 characters, citing the timeframe and values.
 - invalidation: one sentence on what would prove the idea wrong.
-- newsWarning: summarise upcoming calendar events within the next 30 minutes from the data, or null if there are none.
+- newsWarning: summarise upcoming calendar events from the data, or null if there are none.
 - confidence is calibrated: 50 is a coin flip, above 75 is rare.`;
 
 function seriesBrief(s: MacroSeries | null) {
@@ -115,10 +115,10 @@ export function buildUserPayload(
     },
     calendar: {
       source: calendar.source,
-      highImpactUsdNext30m: calendar.events.slice(0, 8).map((e) => ({
+      highImpactUsdNext48h: calendar.events.slice(0, 8).map((e) => ({
         title: e.title,
         timeUtc: new Date(e.time).toISOString(),
-        minutesFromNow: round((e.time - now) / 60_000, 0),
+        hoursFromNow: round((e.time - now) / 3_600_000, 1),
         forecast: e.forecast,
         previous: e.previous,
       })),

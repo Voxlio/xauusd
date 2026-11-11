@@ -117,7 +117,7 @@ export type CalendarSource = "finnhub" | "forexfactory" | "unavailable";
 
 export interface CalendarSummary {
   source: CalendarSource;
-  /** High-impact USD events from 15 minutes ago up to 30 minutes ahead. */
+  /** High-impact USD events from 15 minutes ago up to 48h ahead. */
   events: EconomicEvent[];
   note: string | null;
 }

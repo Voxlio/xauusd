@@ -66,7 +66,7 @@ export function summarizeMacro(realYield: MacroSeries | null, usdIndex: MacroSer
   return { realYield, usdIndex, tilt, notes };
 }
 
-/** High-impact US events from 15 minutes ago up to 30 minutes ahead, de-duplicated, soonest first. */
+/** High-impact US events from 15 minutes ago up to 48 hours ahead, de-duplicated, soonest first. */
 export function summarizeCalendar(
   events: readonly EconomicEvent[],
   now: number,
@@ -86,7 +86,7 @@ export function summarizeCalendar(
   return { source, events: window, note };
 }
 
-/** Events that block new trades: within 15 minutes after or 30 minutes before release. */
+/** Events that block new trades: within 15 minutes after or 3 hours before release. */
 export function blockingEvents(events: readonly EconomicEvent[], now: number): EconomicEvent[] {
   return events.filter((e) => e.time >= now - RULES.newsBlockBehindMs && e.time <= now + RULES.newsBlockAheadMs);
 }
@@ -96,7 +96,7 @@ export function describeEvent(e: EconomicEvent, now: number): string {
   return `${e.title} ${when} (${formatUtc(e.time)})`;
 }
 
-/** Warning bar text, or null when the calendar is clear for 30 min. */
+/** Warning bar text, or null when the calendar is clear for 48h. */
 export function newsWarningText(calendar: CalendarSummary, now: number): string | null {
   if (calendar.source === "unavailable") {
     return "Economic calendar unavailable. Check high-impact USD news yourself before trading.";
@@ -106,9 +106,9 @@ export function newsWarningText(calendar: CalendarSummary, now: number): string 
   const listed = calendar.events.slice(0, 3).map((e) => describeEvent(e, now));
   const more = calendar.events.length > 3 ? ` +${calendar.events.length - 3} more` : "";
   if (blocking.length > 0) {
-    return `High-impact USD news within 30 minutes: ${listed.join("; ")}${more}. No new trades until it has passed.`;
+    return `High-impact USD news within 3 hours: ${listed.join("; ")}${more}. No new trades until it has passed.`;
   }
-  return `High-impact USD news in the next 30 minutes: ${listed.join("; ")}${more}.`;
+  return `High-impact USD news in the next 48h: ${listed.join("; ")}${more}.`;
 }
 
 /** Deterministic fundamental bullets used when the AI is skipped, and shown to the model as facts. */
@@ -117,7 +117,7 @@ export function fundamentalFacts(macro: MacroSummary, calendar: CalendarSummary,
   if (calendar.source === "unavailable") {
     facts.push("Economic calendar could not be loaded.");
   } else if (calendar.events.length === 0) {
-    facts.push("No high-impact USD events in the next 30 minutes.");
+    facts.push("No high-impact USD events in the next 48 hours.");
   } else {
     facts.push(`Next high-impact USD event: ${describeEvent(calendar.events[0], now)}.`);
   }
