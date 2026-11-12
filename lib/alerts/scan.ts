@@ -1,10 +1,15 @@
 /**
  * Framework-agnostic handler for POST /api/cron/scan (Request in, Response out).
- * Flow: auth -> mode -> cheap code-only checks -> the same pipeline as /api/signal -> alert rules -> Telegram -> Redis.
+ * Flow: auth -> mode -> config -> call tracker (open calls) -> cheap code-only checks -> the same pipeline as
+ * /api/signal -> alert rules -> new call + Telegram -> Redis. The tracker and the scan fail independently.
  * All I/O is injected, so tests run offline. app/api/cron/scan/route.ts delegates here.
  */
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createProvider as defaultCreateProvider, type AIProvider } from "../ai/provider";
+import { BUDGET } from "../config";
+import { createRedisCallStore, type CallStore } from "../calls/store";
+import { runTracker, type TrackerSummary } from "../calls/run";
+import type { Call } from "../calls/types";
 import { goldMarketSession } from "../marketHours";
 import { dataCache, type TtlCache } from "../server/cache";
 import { readAlertConfig, readConfig, type AIConfig, type AlertConfig, type Env } from "../server/env";
@@ -12,9 +17,10 @@ import { AppError } from "../server/errors";
 import type { FetchLike } from "../server/http";
 import { generateSignal } from "../signal/service";
 import type { Mode, SignalResponse } from "../types";
-import { evaluateAlert, isAlertSession, trendVotesFullyMixed } from "./rules";
+import { formatNewCallMessage, navKeyboard } from "./format";
+import { evaluateAlert, isAlertSession, trendVotesFullyMixed, VALID_FOR_MS } from "./rules";
 import { createRedisStore, LOCK_TTL_SECONDS, type AlertSide, type AlertStore } from "./store";
-import { formatAlertMessage, sendTelegramMessage, type SendTelegram } from "./telegram";
+import { sendMessage, type SendTelegram } from "./telegram";
 
 export interface ScanDeps {
   env: Env;
@@ -25,7 +31,9 @@ export interface ScanDeps {
   generate: typeof generateSignal;
   /** Returns null when Redis is not configured. */
   createStore: (config: AlertConfig, fetchImpl: FetchLike) => AlertStore | null;
+  createCallStore: (config: AlertConfig, fetchImpl: FetchLike) => CallStore | null;
   sendTelegram: SendTelegram;
+  newId: () => string;
   now: () => number;
   clock: () => number;
 }
@@ -39,9 +47,6 @@ const HEADERS = {
 function json(status: number, body: unknown, extra: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...HEADERS, ...extra } });
 }
-
-const skipped = (reason: string, extra: Record<string, unknown> = {}): Response => json(200, { status: "skipped", reason, ...extra });
-const failed = (status: number, code: string, message: string): Response => json(status, { status: "error", code, message });
 
 /** Constant-time comparison of two secrets (hashing first hides length differences). */
 export function secretsMatch(provided: string, expected: string): boolean {
@@ -71,7 +76,7 @@ async function readMode(request: Request): Promise<Mode | null> {
 }
 
 /** Removes configured secrets from a log line. */
-function redactSecrets(text: string, env: Env): string {
+export function redactSecrets(text: string, env: Env): string {
   let out = text;
   for (const [name, v] of Object.entries(env)) {
     if (/(_KEY|_TOKEN|_SECRET)$/.test(name) && v && v.trim().length >= 6) out = out.split(v.trim()).join("[redacted]");
@@ -87,11 +92,19 @@ export async function handleScanRequest(request: Request, overrides: Partial<Sca
     createProvider: defaultCreateProvider,
     generate: generateSignal,
     createStore: (c, fetchImpl) => (c.redisUrl && c.redisToken ? createRedisStore({ url: c.redisUrl, token: c.redisToken, fetchImpl }) : null),
-    sendTelegram: sendTelegramMessage,
+    createCallStore: (c, fetchImpl) => (c.redisUrl && c.redisToken ? createRedisCallStore({ url: c.redisUrl, token: c.redisToken, fetchImpl }) : null),
+    sendTelegram: sendMessage,
+    newId: () => randomBytes(3).toString("hex").toUpperCase(),
     now: Date.now,
     clock: Date.now,
     ...overrides,
   };
+
+  // Shown in every response once the tracker has done something (or failed).
+  let tracker: TrackerSummary | null = null;
+  const body = (b: Record<string, unknown>) => (tracker ? { ...b, tracker } : b);
+  const skipped = (reason: string): Response => json(200, body({ status: "skipped", reason }));
+  const failed = (status: number, code: string, message: string): Response => json(status, body({ status: "error", code, message }));
 
   try {
     if (request.method !== "POST") {
@@ -106,18 +119,38 @@ export async function handleScanRequest(request: Request, overrides: Partial<Sca
     }
 
     const mode = await readMode(request);
-    if (!mode) return failed(400, "INVALID_MODE", 'Send mode as ?mode=day or ?mode=swing.');
+    if (!mode) return failed(400, "INVALID_MODE", "Send mode as ?mode=day or ?mode=swing.");
 
     const config = readConfig(deps.env);
     const alerts = readAlertConfig(deps.env);
     if (!alerts.telegramToken || !alerts.telegramChatId) {
       return failed(500, "CONFIG_MISSING", "Server is missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.");
     }
+    const { telegramToken, telegramChatId } = alerts;
     const store = deps.createStore(alerts, deps.fetchImpl);
-    if (!store) return failed(503, "STORE_UNAVAILABLE", "Alert state store (Redis) is not configured; nothing was sent.");
+    const callStore = deps.createCallStore(alerts, deps.fetchImpl);
+    if (!store || !callStore) return failed(503, "STORE_UNAVAILABLE", "Alert state store (Redis) is not configured; nothing was sent.");
 
-    // Free checks before any data credits or AI tokens are spent.
     const now = deps.now();
+    const send: SendTelegram = (o) => deps.sendTelegram(o);
+
+    // 1. Follow open calls. Its failure never blocks the scan below.
+    try {
+      const summary = await runTracker({
+        store: callStore,
+        ctx: { config, fetchImpl: deps.fetchImpl, cache: deps.cache, timeoutMs: BUDGET.upstreamTimeoutMs },
+        now,
+        clock: deps.clock,
+        send: (text, replyMarkup) => send({ token: telegramToken, chatId: telegramChatId, text, fetchImpl: deps.fetchImpl, replyMarkup }),
+      });
+      if (summary.checked > 0 || summary.error || summary.note) tracker = summary;
+    } catch (error) {
+      const name = error instanceof Error ? error.name : "Error";
+      console.error(`[api/cron/scan] tracker ${name}: ${error instanceof Error ? redactSecrets(error.message, deps.env) : "unknown"}`);
+      tracker = { checked: 0, events: 0, error: "tracker_failed" };
+    }
+
+    // 2. New-signal scan. Free checks first, before any data credits or AI tokens are spent.
     if (!goldMarketSession(now).open) return skipped("market_closed");
     if (alerts.sessionsOnly && !isAlertSession(now)) return skipped("outside_session");
 
@@ -151,6 +184,9 @@ export async function handleScanRequest(request: Request, overrides: Partial<Sca
     try {
       const first = await decide();
       if (!first.send) return skipped(first.reason);
+      if (signal.entry === null || signal.stopLoss === null || signal.takeProfit1 === null || signal.takeProfit2 === null || signal.confidence === null) {
+        return skipped("incomplete_levels");
+      }
 
       // Lock so two overlapping runs cannot both send, then re-check with fresh state.
       if (!(await store.acquireLock(mode, side, LOCK_TTL_SECONDS))) return skipped("duplicate_lock");
@@ -158,15 +194,39 @@ export async function handleScanRequest(request: Request, overrides: Partial<Sca
       try {
         const second = await decide();
         if (!second.send) return skipped(second.reason);
-        await deps.sendTelegram({
-          token: alerts.telegramToken,
-          chatId: alerts.telegramChatId,
-          text: formatAlertMessage(signal, mode, now),
-          fetchImpl: deps.fetchImpl,
-        });
+
+        const call: Call = {
+          id: deps.newId(),
+          mode,
+          side,
+          entry: signal.entry,
+          stopLoss: signal.stopLoss,
+          tp1: signal.takeProfit1,
+          tp2: signal.takeProfit2,
+          confidence: signal.confidence,
+          smcVerdict: signal.smcVerdict ?? "unavailable",
+          createdAt: now,
+          validUntil: now + VALID_FOR_MS[mode],
+          status: "PENDING",
+          lastCheckedAt: now,
+        };
+        // The call exists before the message, so its id is real; it is removed again if the send fails.
+        await callStore.create(call);
+        try {
+          await send({
+            token: telegramToken,
+            chatId: telegramChatId,
+            text: formatNewCallMessage(call, signal),
+            fetchImpl: deps.fetchImpl,
+            replyMarkup: navKeyboard(),
+          });
+        } catch (error) {
+          await callStore.remove(call.id).catch(() => undefined);
+          throw error;
+        }
         sent = true;
-        await store.saveLast(mode, side, { entry: signal.entry as number, at: now, confidence: signal.confidence as number }, alerts.cooldownHours * 3600);
-        return json(200, { status: "sent", mode, side, confidence: signal.confidence, reason: second.reason });
+        await store.saveLast(mode, side, { entry: call.entry, at: now, confidence: call.confidence }, alerts.cooldownHours * 3600);
+        return json(200, body({ status: "sent", mode, side, confidence: call.confidence, reason: second.reason, callId: call.id }));
       } finally {
         // Keep the lock after a successful send (it expires on its own); otherwise free it so the next scan can retry.
         if (!sent) await store.releaseLock(mode, side).catch(() => undefined);

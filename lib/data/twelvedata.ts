@@ -55,21 +55,26 @@ export function parseTwelveDataSeries(data: unknown): Candle[] {
   return candles;
 }
 
-export function buildTwelveDataUrl(timeframe: Timeframe, apiKey: string): string {
+export function buildTwelveDataUrl(timeframe: Timeframe, apiKey: string, count: number = CANDLE_COUNT): string {
   const params = new URLSearchParams({
     symbol: SYMBOL,
     interval: TWELVE_DATA_INTERVAL[timeframe],
-    outputsize: String(CANDLE_COUNT),
+    outputsize: String(count),
     timezone: "UTC",
     apikey: apiKey,
   });
   return `${BASE_URL}?${params.toString()}`;
 }
 
-export async function fetchCandles(timeframe: Timeframe, ctx: DataContext): Promise<CacheResult<Candle[]>> {
+/**
+ * `count` defaults to CANDLE_COUNT and shares the standard cache entry; a larger count (used only by the alert
+ * call tracker when an open call is older than the default history) gets its own cache entry.
+ */
+export async function fetchCandles(timeframe: Timeframe, ctx: DataContext, count: number = CANDLE_COUNT): Promise<CacheResult<Candle[]>> {
   const ttl = Math.min(ctx.config.cacheTtlMs, BUDGET.candleTtlMaxMs);
-  return ctx.cache.get(`twelvedata:${timeframe}`, ttl, BUDGET.staleMaxMs, async () => {
-    const res = await fetchJson(SOURCE, buildTwelveDataUrl(timeframe, ctx.config.twelveDataKey), {
+  const key = count === CANDLE_COUNT ? `twelvedata:${timeframe}` : `twelvedata:${timeframe}:${count}`;
+  return ctx.cache.get(key, ttl, BUDGET.staleMaxMs, async () => {
+    const res = await fetchJson(SOURCE, buildTwelveDataUrl(timeframe, ctx.config.twelveDataKey, count), {
       fetchImpl: ctx.fetchImpl,
       timeoutMs: ctx.timeoutMs,
     });

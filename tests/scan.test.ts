@@ -2,12 +2,16 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { handleScanRequest, secretsMatch, type ScanDeps } from "../lib/alerts/scan";
 import { createMemoryStore, type AlertStore } from "../lib/alerts/store";
+import { createMemoryCallStore, type CallStore } from "../lib/calls/store";
+import type { Call } from "../lib/calls/types";
+import { AppError } from "../lib/server/errors";
 import type { SendTelegram } from "../lib/alerts/telegram";
 import { TelegramError } from "../lib/alerts/telegram";
 import { TtlCache } from "../lib/server/cache";
 import type { SignalResponse, TechnicalSummary, ValidatedSignal } from "../lib/types";
-import { scriptedFetch } from "./fakes";
-import { compliantBuy, fakeAI, MARKET_NOW } from "./market";
+import { jsonResponse, scriptedFetch } from "./fakes";
+import { compliantBuy, fakeAI, finnhubRoute, fredRoute, MARKET_NOW, marketCandles, toTwelveDataPayload, twelveDataRoute } from "./market";
+import { generateSignal } from "../lib/signal/service";
 
 const SECRET = "cron-secret-0123456789";
 const ENV = {
@@ -37,12 +41,14 @@ function response(s: ValidatedSignal): SignalResponse {
 interface Harness {
   deps: Partial<ScanDeps>;
   store: ReturnType<typeof createMemoryStore>;
+  callStore: ReturnType<typeof createMemoryCallStore>;
   sent: string[];
   generated: string[];
 }
 
-function harness(opts: { signal?: ValidatedSignal; now?: number; alignment?: TechnicalSummary["alignment"]; store?: AlertStore | null; send?: SendTelegram } = {}): Harness {
+function harness(opts: { signal?: ValidatedSignal; now?: number; alignment?: TechnicalSummary["alignment"]; store?: AlertStore | null; send?: SendTelegram; callStore?: CallStore | null } = {}): Harness {
   const store = createMemoryStore();
+  const callStore = createMemoryCallStore();
   const sent: string[] = [];
   const generated: string[] = [];
   const deps: Partial<ScanDeps> = {
@@ -58,9 +64,11 @@ function harness(opts: { signal?: ValidatedSignal; now?: number; alignment?: Tec
       return response(opts.signal ?? signal());
     },
     createStore: () => (opts.store === undefined ? store : opts.store),
+    createCallStore: () => (opts.callStore === undefined ? callStore : opts.callStore),
+    newId: () => "TESTID",
     sendTelegram: opts.send ?? (async ({ text }) => void sent.push(text)),
   };
-  return { deps, store, sent, generated };
+  return { deps, store, callStore, sent, generated };
 }
 
 function req(method = "POST", url = "https://app.example/api/cron/scan?mode=day", token: string | null = SECRET): Request {
@@ -121,7 +129,9 @@ describe("POST /api/cron/scan", () => {
     assert.match(text, /"status":"sent"/);
     for (const secret of Object.values(ENV)) assert.ok(!text.includes(secret), "no secrets in the response");
     assert.equal(h.sent.length, 1);
-    assert.match(h.sent[0], /XAU\/USD BUY \(Day\)/);
+    assert.match(h.sent[0], /NEW CALL: XAU\/USD BUY<\/b> \(Day\) <code>#TESTID<\/code>/);
+    assert.equal((await h.callStore.get("TESTID"))?.status, "PENDING", "the alert became a tracked call");
+    assert.equal((await h.callStore.get("TESTID"))?.validUntil, MARKET_NOW + 30 * 60_000);
     assert.deepEqual(h.store.last.get("alert:last:day:BUY"), { entry: 2400, at: MARKET_NOW, confidence: 72 });
   });
 
@@ -208,6 +218,7 @@ describe("POST /api/cron/scan", () => {
     assert.ok(!text.includes("tg-secret-token"));
     assert.equal(h.store.last.size, 0);
     assert.equal(h.store.locks.size, 0);
+    assert.equal(h.callStore.calls.size, 0, "no tracked call for a message that was never delivered");
   });
 
   test("missing Telegram config is reported without values", async () => {
@@ -215,5 +226,100 @@ describe("POST /api/cron/scan", () => {
     const res = await handleScanRequest(req(), { ...h.deps, env: { ...ENV, TELEGRAM_BOT_TOKEN: undefined } });
     assert.equal(res.status, 500);
     assert.equal(h.generated.length, 0);
+  });
+});
+
+describe("cron scan: call tracker", () => {
+  const T = MARKET_NOW;
+  function openCall(over: Partial<Call> = {}): Call {
+    return {
+      id: "OPEN01", mode: "day", side: "BUY", entry: 2400, stopLoss: 2390, tp1: 2415, tp2: 2425, confidence: 70, smcVerdict: "agree",
+      createdAt: T - 60 * 60_000, validUntil: T + 60 * 60_000, status: "ACTIVE", enteredAt: T - 45 * 60_000, lastCheckedAt: T - 60 * 60_000, ...over,
+    };
+  }
+  /** Two closed M15 candles after the call was created; the second one reaches TP1. */
+  const trackerCandles = () => {
+    const start = T - 60 * 60_000;
+    return [0, 1, 2, 3].map((i) => ({
+      time: start + i * 15 * 60_000,
+      open: 2405,
+      close: 2405,
+      high: i === 2 ? 2416 : 2406,
+      low: 2404,
+    }));
+  };
+  const candleRoute = () => ["api.twelvedata.com", () => jsonResponse(toTwelveDataPayload(trackerCandles()))] as [string, () => Response];
+
+  test("sends one message per new event, updates the call and reports it", async () => {
+    const h = harness();
+    await h.callStore.create(openCall());
+    const res = await handleScanRequest(req(), { ...h.deps, fetchImpl: scriptedFetch([candleRoute()]).fetchImpl, signal: undefined } as Partial<ScanDeps>);
+    const b = await body(res);
+    assert.equal(b.status, "sent");
+    assert.deepEqual(b.tracker, { checked: 1, events: 1 });
+    assert.equal(h.sent.length, 2, "one TP1 message and one new-call alert");
+    assert.match(h.sent[0], /TP1 secured/);
+    assert.equal((await h.callStore.get("OPEN01"))?.status, "TP1_HIT");
+    assert.equal(h.generated.length, 1);
+  });
+
+  test("a tracker failure does not block the scan", async () => {
+    const broken: CallStore = { ...createMemoryCallStore(), listOpen: async () => { throw new Error("redis exploded"); } };
+    const h = harness({ callStore: broken });
+    const res = await handleScanRequest(req(), h.deps);
+    const b = await body(res);
+    assert.equal(b.status, "sent");
+    assert.deepEqual(b.tracker, { checked: 0, events: 0, error: "tracker_failed" });
+    assert.equal(h.sent.length, 1);
+  });
+
+  test("a scan failure does not undo the tracker's work", async () => {
+    const h = harness();
+    await h.callStore.create(openCall());
+    const failing: Partial<ScanDeps> = {
+      ...h.deps,
+      fetchImpl: scriptedFetch([candleRoute()]).fetchImpl,
+      generate: async () => { throw new AppError(502, "MARKET_DATA_UNAVAILABLE", "no candles"); },
+    };
+    const res = await handleScanRequest(req(), failing);
+    assert.equal(res.status, 502);
+    const b = await body(res);
+    assert.deepEqual(b.tracker, { checked: 1, events: 1 });
+    assert.match(h.sent[0], /TP1 secured/);
+    assert.equal((await h.callStore.get("OPEN01"))?.status, "TP1_HIT");
+  });
+
+  test("the tracker runs even when the market is closed (expiry messages still go out)", async () => {
+    const h = harness({ now: SAT });
+    await h.callStore.create(openCall({ status: "PENDING", enteredAt: undefined, createdAt: SAT - 3 * 3_600_000, lastCheckedAt: SAT - 3 * 3_600_000, validUntil: SAT - 2 * 3_600_000 }));
+    const res = await handleScanRequest(req(), { ...h.deps, fetchImpl: scriptedFetch([["api.twelvedata.com", () => jsonResponse(toTwelveDataPayload([{ time: SAT - 3 * 3_600_000, open: 2420, high: 2421, low: 2419, close: 2420 }]))]]).fetchImpl });
+    const b = await body(res);
+    assert.equal(b.reason, "market_closed");
+    assert.match(h.sent[0], /Expired/);
+    assert.equal((await h.callStore.get("OPEN01"))?.status, "EXPIRED");
+  });
+
+  test("with no open calls there is no tracker field and no candle request", async () => {
+    const h = harness();
+    const { fetchImpl, calls } = scriptedFetch([]);
+    const res = await handleScanRequest(req(), { ...h.deps, fetchImpl });
+    assert.equal((await body(res)).tracker, undefined);
+    assert.equal(calls.length, 0);
+  });
+
+  test("the tracker and the Day pipeline share one M15 request", async () => {
+    const candles = marketCandles();
+    const { fetchImpl, calls } = scriptedFetch([
+      ["api.twelvedata.com", twelveDataRoute(candles)],
+      ["api.stlouisfed.org", fredRoute],
+      ["finnhub.io", finnhubRoute()],
+    ]);
+    const h = harness();
+    await h.callStore.create(openCall({ entry: 99_999, status: "PENDING", enteredAt: undefined, createdAt: T - 20 * 60_000, lastCheckedAt: T - 20 * 60_000, validUntil: T + 10 * 60_000, stopLoss: 1 }));
+    const deps: Partial<ScanDeps> = { ...h.deps, fetchImpl, generate: generateSignal, createProvider: () => fakeAI(compliantBuy) };
+    const res = await handleScanRequest(req(), deps);
+    assert.equal(res.status, 200);
+    const m15 = calls.filter((c) => c.url.includes("interval=15min"));
+    assert.equal(m15.length, 1, "one M15 request for the tracker and the pipeline together");
   });
 });

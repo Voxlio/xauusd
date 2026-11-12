@@ -3,7 +3,7 @@
  * Keys: alert:last:<mode>:<side> holds the last alerted entry; alert:lock:<mode>:<side> is a short SET NX lock
  * so two overlapping runs cannot both send.
  */
-import type { FetchLike } from "../server/http";
+import { createRedisClient, StoreError, type RedisRestOptions } from "./redis";
 import type { Mode } from "../types";
 import type { LastAlert } from "./rules";
 
@@ -21,15 +21,11 @@ export interface AlertStore {
 /** Long enough to cover one scan run (maxDuration 30 s), short enough not to block the next scan. */
 export const LOCK_TTL_SECONDS = 120;
 
+export { StoreError };
+export type { RedisRestOptions };
+
 export const lastKey = (mode: Mode, side: AlertSide): string => `alert:last:${mode}:${side}`;
 export const lockKey = (mode: Mode, side: AlertSide): string => `alert:lock:${mode}:${side}`;
-
-export class StoreError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "StoreError";
-  }
-}
 
 function parseLast(raw: unknown): LastAlert | null {
   if (typeof raw !== "string") return null;
@@ -44,53 +40,20 @@ function parseLast(raw: unknown): LastAlert | null {
   return null;
 }
 
-export interface RedisRestOptions {
-  url: string;
-  token: string;
-  fetchImpl: FetchLike;
-  timeoutMs?: number;
-}
-
-export function createRedisStore({ url, token, fetchImpl, timeoutMs = 4_000 }: RedisRestOptions): AlertStore {
-  const endpoint = url.replace(/\/+$/, "");
-
-  async function command(args: Array<string | number>): Promise<unknown> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      let response: Response;
-      try {
-        response = await fetchImpl(endpoint, {
-          method: "POST",
-          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-          body: JSON.stringify(args),
-          signal: controller.signal,
-          cache: "no-store",
-        });
-      } catch {
-        throw new StoreError(controller.signal.aborted ? "Redis timed out" : "Redis could not be reached");
-      }
-      if (!response.ok) throw new StoreError(`Redis request failed (HTTP ${response.status})`);
-      const body = (await response.json().catch(() => null)) as { result?: unknown; error?: unknown } | null;
-      if (!body || body.error) throw new StoreError("Redis returned an error");
-      return body.result ?? null;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
+export function createRedisStore(options: RedisRestOptions): AlertStore {
+  const client = createRedisClient(options);
   return {
     async getLast(mode, side) {
-      return parseLast(await command(["GET", lastKey(mode, side)]));
+      return parseLast(await client.command(["GET", lastKey(mode, side)]));
     },
     async saveLast(mode, side, alert, ttlSeconds) {
-      await command(["SET", lastKey(mode, side), JSON.stringify(alert), "EX", ttlSeconds]);
+      await client.command(["SET", lastKey(mode, side), JSON.stringify(alert), "EX", ttlSeconds]);
     },
     async acquireLock(mode, side, ttlSeconds) {
-      return (await command(["SET", lockKey(mode, side), "1", "NX", "EX", ttlSeconds])) === "OK";
+      return (await client.command(["SET", lockKey(mode, side), "1", "NX", "EX", ttlSeconds])) === "OK";
     },
     async releaseLock(mode, side) {
-      await command(["DEL", lockKey(mode, side)]);
+      await client.command(["DEL", lockKey(mode, side)]);
     },
   };
 }

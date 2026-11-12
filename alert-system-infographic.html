@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XAUUSD Telegram Alert System</title>
+<style>
+  :root{--bg:#0f1420;--card:#171e2e;--line:#2a3550;--gold:#e8b84a;--text:#e9edf5;--mute:#9aa6bf;--ok:#4ade80;--skip:#fbbf24;--err:#f87171;--blue:#60a5fa}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif;padding:28px 16px 48px}
+  .wrap{max-width:980px;margin:0 auto}
+  h1{font-size:28px;margin:0 0 4px;color:var(--gold)}
+  .sub{color:var(--mute);margin:0 0 26px}
+  h2{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--mute);margin:34px 0 12px}
+  .row{display:flex;flex-wrap:wrap;gap:12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;flex:1 1 220px}
+  .card b{display:block;margin-bottom:4px}
+  .card small{color:var(--mute)}
+  .flow{display:flex;flex-direction:column;align-items:stretch;gap:0}
+  .step{display:flex;gap:14px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
+  .num{flex:0 0 34px;height:34px;border-radius:50%;background:var(--gold);color:#1a1405;font-weight:700;display:grid;place-items:center}
+  .step h3{margin:0 0 2px;font-size:16px}
+  .step p{margin:0;color:var(--mute);font-size:14px}
+  .arrow{text-align:center;color:var(--gold);line-height:1;font-size:20px;padding:4px 0}
+  .exit{margin-top:8px;display:inline-block;font-size:12px;padding:2px 9px;border-radius:99px;border:1px solid}
+  .skip{color:var(--skip);border-color:var(--skip)}
+  .err{color:var(--err);border-color:var(--err)}
+  .ok{color:var(--ok);border-color:var(--ok)}
+  .tags span{margin-right:6px}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  th,td{padding:9px 14px;text-align:left;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}
+  th{color:var(--mute);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+  tr:last-child td{border-bottom:0}
+  code{background:#0b101b;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:13px;color:var(--blue)}
+  .phone{background:#0b101b;border:1px solid var(--line);border-radius:14px;padding:16px 18px;font-size:14px;line-height:1.55;max-width:420px}
+  .phone .t{color:var(--gold);font-weight:700}
+  .phone i{color:var(--mute)}
+  .cols{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start}
+  .cols>div{flex:1 1 300px}
+  .tl{display:flex;align-items:stretch;gap:2px;margin:6px 0 4px}
+  .tl div{flex:1;height:22px;border-radius:4px;background:#243050}
+  .tl .on{background:var(--ok)}
+  .tl .mid{background:#3b82f6}
+  .lbl{display:flex;justify-content:space-between;color:var(--mute);font-size:11px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>XAU/USD Telegram Alert System</h1>
+  <p class="sub">What happens from the moment GitHub's timer fires to the message on your phone.</p>
+
+  <h2>The cast</h2>
+  <div class="row">
+    <div class="card"><b>GitHub Actions</b><small>The alarm clock. Every 15 min (day) and hourly (swing), Mon-Fri, it sends one authenticated request to your app.</small></div>
+    <div class="card"><b>Vercel app</b><small><code>/api/cron/scan</code> runs the same signal pipeline as the website, then decides whether to alert.</small></div>
+    <div class="card"><b>Upstash Redis</b><small>The memory. Remembers the last alert (for cooldown) and holds a short lock against double-sends.</small></div>
+    <div class="card"><b>Telegram bot</b><small>The messenger. Delivers the trade idea to your chat.</small></div>
+  </div>
+
+  <h2>One scan, step by step</h2>
+  <div class="flow">
+    <div class="step"><div class="num">1</div><div><h3>Timer fires, POST with secret</h3><p><code>Authorization: Bearer CRON_SECRET</code>, <code>?mode=day</code> or <code>swing</code>.</p></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step"><div class="num">2</div><div><h3>Security check</h3><p>Secret compared in constant time. No secret set on the server means everything is rejected. GET returns 405.</p><span class="exit err">Wrong or missing secret: 401, nothing runs</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step"><div class="num">3</div><div><h3>Free checks (no data credits spent)</h3><p>Config present? Redis reachable? Is gold open (not weekend / 17:00-18:00 NY break)? If <code>ALERT_SESSIONS_ONLY=true</code>, is it 07:00-20:00 UTC on a weekday?</p><span class="exit skip">market_closed / outside_session: skipped</span> <span class="exit err">No Redis: 503, nothing sent</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step"><div class="num">4</div><div><h3>Fetch data and compute in code</h3><p>3 Twelve Data candle requests, FRED macro, economic calendar. EMA/RSI/MACD/ATR, structure and SMC computed locally.</p></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step"><div class="num">5</div><div><h3>Cheap pre-check before the AI</h3><p>Hard gates (news within 30 min, stale prices, calendar down in strict mode) or fully mixed trend votes (up = down) skip the AI call and save money.</p><span class="exit skip">gate_no_trade / trend_votes_mixed: skipped</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step"><div class="num">6</div><div><h3>AI + validation + SMC filter</h3><p>Model proposes a trade; code verifies every price (stop size, TP1 &ge; 1.5R, TP2 &ge; 2.5R) and SMC may lower confidence.</p><span class="exit skip">NO_TRADE: skipped</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step"><div class="num">7</div><div><h3>Alert rules (pure code)</h3><p>Side is BUY/SELL, confidence &ge; <code>ALERT_MIN_CONFIDENCE</code> (60), SMC verdict is not <code>against</code>, and not inside the cooldown (same mode + side, 3 h) unless the entry moved more than 1 &times; ATR since the last alert.</p><span class="exit skip">low confidence / smc_against / cooldown: skipped</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step"><div class="num">8</div><div><h3>Lock, re-check, send, remember</h3><p>Redis <code>SET NX</code> lock (120 s) stops two overlapping runs from both sending. State is re-read, message sent to Telegram, then the entry and time are saved for the cooldown.</p><span class="exit skip">duplicate_lock: skipped</span> <span class="exit err">Telegram fails: 502, lock released, retried next scan</span> <span class="exit ok">sent</span></div></div>
+  </div>
+
+  <h2>What lands on your phone</h2>
+  <div class="cols">
+    <div class="phone">
+      <div class="t">XAU/USD BUY (Day)</div>
+      Entry (limit): <b>2,400.00</b><br>
+      Stop loss: 2,390.50<br>
+      TP1: 2,415.00 (1.6R)<br>
+      TP2: 2,425.00 (2.6R)<br>
+      Confidence: 72/100<br>
+      SMC: agree<br><br>
+      <b>Why</b><br>
+      - H4 uptrend<br>
+      - H1 pullback to EMA 50<br>
+      - RSI resets near 48<br><br>
+      <b>Invalidation:</b> Close below 2,390 on H1<br><br>
+      Valid until Fri 16 Oct 10:35 UTC<br>
+      <i>Demo account only. Not financial advice.</i>
+    </div>
+    <div>
+      <p style="margin-top:0"><b>Valid until</b> is about 30 minutes for day ideas and 4 hours for swing ideas. Treat an alert as stale after that.</p>
+      <p>All dynamic text is HTML-escaped, so odd characters in news or reasons can't break the message.</p>
+    </div>
+  </div>
+
+  <h2>Every possible outcome</h2>
+  <table>
+    <tr><th>Response</th><th>Meaning</th><th>Cost</th></tr>
+    <tr><td><code>sent</code></td><td>Passed every rule, Telegram accepted it, Redis updated.</td><td>3 data requests + 1 AI call</td></tr>
+    <tr><td><code>skipped: market_closed</code> / <code>outside_session</code></td><td>Weekend, daily break, or outside your chosen hours.</td><td>Free</td></tr>
+    <tr><td><code>skipped: trend_votes_mixed</code> / <code>gate_no_trade</code></td><td>Code decided no trade before spending AI tokens.</td><td>3 data requests</td></tr>
+    <tr><td><code>skipped: no_trade</code>, <code>confidence_below_60</code>, <code>smc_against</code></td><td>The idea wasn't good enough.</td><td>3 data + 1 AI</td></tr>
+    <tr><td><code>skipped: cooldown_day_BUY</code></td><td>Same side alerted recently and entry hasn't moved over 1 &times; ATR.</td><td>3 data + 1 AI</td></tr>
+    <tr><td><code>skipped: duplicate_lock</code></td><td>Another run is sending the same alert right now.</td><td>3 data + 1 AI</td></tr>
+    <tr><td><code>error</code> 401 / 503 / 502</td><td>Bad secret / Redis missing or down / Telegram refused. Fails closed, so you never get spam. The GitHub run turns red.</td><td>Varies</td></tr>
+  </table>
+
+  <h2>Typical day (day mode, UTC)</h2>
+  <div class="tl">
+    <div></div><div></div><div></div><div></div><div></div><div></div><div></div>
+    <div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div><div class="mid"></div>
+    <div></div><div></div><div></div><div></div>
+  </div>
+  <div class="lbl"><span>00:00</span><span>07:00 London opens</span><span>13:00 NY overlap</span><span>20:00</span><span>24:00</span></div>
+  <p style="color:var(--mute);font-size:14px">Blue = hours covered if you set <code>ALERT_SESSIONS_ONLY=true</code>. Without it, scans run all weekday hours and only skip when the market is closed.</p>
+
+  <h2>Budget</h2>
+  <div class="row">
+    <div class="card"><b>96 + 24 scans/day</b><small>Day every 15 min, swing hourly.</small></div>
+    <div class="card"><b>&le; ~360 data requests/day</b><small>3 per scan. Free Twelve Data plan allows 800/day, 8/min.</small></div>
+    <div class="card"><b>1 AI call per full scan</b><small>Skipped when the free checks or the pre-check say no.</small></div>
+  </div>
+</div>
+</body>
+</html>

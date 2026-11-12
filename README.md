@@ -92,7 +92,7 @@ A scheduled scan runs the same pipeline as `POST /api/signal` and sends a Telegr
 3. runs the pipeline. A code-only pre-check skips the AI call when a hard gate already says NO TRADE or the per-timeframe trend votes are fully mixed (up votes equal down votes);
 4. sends an alert only when the side is BUY or SELL, confidence is at least `ALERT_MIN_CONFIDENCE`, and the SMC verdict is not `against`;
 5. applies a cooldown per mode and side (`ALERT_COOLDOWN_HOURS`), unless the new entry differs from the last alerted entry by more than 1 x ATR;
-6. takes a short Redis lock (`SET NX`, 120 s) so two overlapping runs cannot both send, sends the message, and records `alert:last:<mode>:<side>`.
+6. takes a short Redis lock (`SET NX`, 120 s) so two overlapping runs cannot both send, creates the tracked call, sends the message, and records `alert:last:<mode>:<side>`. Open calls are followed before step 2 on every run (see Trade lifecycle).
 
 If Redis is not configured or unreachable the scan sends nothing and returns 503 (fails closed, so you never get spam). The response JSON is `{"status":"sent"|"skipped"|"error", ...}` and never contains secrets.
 
@@ -105,6 +105,50 @@ If Redis is not configured or unreachable the scan sends nothing and returns 503
 5. **Vercel env vars**: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CRON_SECRET`, the Redis pair, optionally `ALERT_MIN_CONFIDENCE`, `ALERT_COOLDOWN_HOURS`, `ALERT_SESSIONS_ONLY`, plus the existing Twelve Data / AI keys. Redeploy.
 6. **GitHub repository secrets** (Settings > Secrets and variables > Actions): `APP_URL` (e.g. `https://your-app.vercel.app`, no trailing slash) and `CRON_SECRET` (same value as in Vercel).
 7. Test: Actions > "Signal scan" > Run workflow, or `curl -X POST "$APP_URL/api/cron/scan?mode=day" -H "Authorization: Bearer $CRON_SECRET"`.
+
+### Trade lifecycle (calls)
+
+Every alert that is sent becomes a tracked **call**. Each cron run first follows the open calls, then looks for a new signal; a failure in one never blocks the other.
+
+| Status | Meaning |
+|---|---|
+| `PENDING` | Waiting for price to touch the entry. Valid for 30 min (Day) or 4 h (Swing). |
+| `ACTIVE` | Entry touched. No time limit. |
+| `TP1_HIT` | TP1 reached; the call stays open until TP2 or the stop. |
+| `TP2_HIT` | Terminal. Result = the TP2 reward/risk (R) of that call's own prices. |
+| `SL_HIT` | Terminal. Result = -1R (also when TP1 was reached first). |
+| `EXPIRED` | Terminal. Never entered (validity ran out, or the stop level was reached before entry, which voids the setup). No result. |
+
+**How candles decide it** (`lib/calls/tracker.ts`, pure and tested):
+
+- Only **closed** 15-minute candles are used, each exactly once, starting with the first candle that opens after the alert. Highs and lows count, not just closes.
+- A candle's range is widened to the previous close, so a gap counts as touching every price it jumped over.
+- `PENDING` becomes `ACTIVE` when a candle touches the entry (before `validUntil`). In that same candle only the stop is checked, so **entry and SL in one candle count as SL**, and targets start with the next candle.
+- After entry, per candle: **SL is checked first, then TP2 (which also records TP1), then TP1.** A candle that touches both the stop and a target counts as **SL** (conservative: the order inside a candle is unknown). A candle that spans both targets records TP1 then TP2.
+- **The stop is not moved to breakeven after TP1.** TP1 then SL closes as `SL_HIT` at -1R, with the TP1 time kept so the stats can show it reached TP1.
+- Re-running is safe: status transitions drive events, so the same event is never sent twice, and a failed Telegram send is retried on the next run without repeating earlier messages.
+- Updates are as fresh as the cron: about **15 minutes** (Day scan cadence), because only closed candles count.
+
+The tracker makes one M15 request per run (500 candles, or more if an open call is older than that, up to 5000) and skips it when nothing is open. It reuses the same cached candles as the Day scan, so a run costs no extra request. It stops sending after about 10 s and finishes the rest on the next run. Calls live in Redis (`calls:item:<id>` hashes, `calls:open` set, `calls:closed` sorted set); closed calls are kept 90 days.
+
+**Messages.** New calls show a confidence meter, entry, stop, TP1 and TP2 with planned R, the SMC verdict, top reasons, a valid-until time and a progress ladder. Each event (🎯 entry, ✅ TP1 secured, 🏆 TP2 smashed, 🛑 SL hit, ⌛ expired) shows a progress bar toward TP2, the time since the call and the call id; closing events add a one-line scoreboard (win rate, total R, streak, rank). Every alert has a Calls / History / Stats button row.
+
+**Stats definitions** (`lib/calls/stats.ts`): a **win** is a call that reached TP1 or TP2 (so TP1 then SL counts as a win for the win rate but still adds -1R to total R). Win rate and R only count calls that entered; expired calls are counted separately. Total R is the sum of results, average R is per entered call, streaks run over entered calls in closing order.
+
+**Ranks** (by entered, closed calls): 🌱 Rookie (start), ⚔️ Apprentice (5+ calls), 🎯 Sniper (15+ calls, win rate 55%+, positive total R), 👑 Gold Master (40+ calls, win rate 60%+, total R of +10 or more). Ranks are for fun and say nothing about future results.
+
+### Telegram commands (webhook)
+
+`POST /api/telegram/webhook` answers `/start`, `/help`, `/calls` (open calls with status, levels and progress), `/history` (closed calls, 5 per page with Prev/Next buttons, set `CALLS_HISTORY_PAGE_SIZE` to change) and `/stats`, plus the inline buttons (answerCallbackQuery, then the message is edited in place). It checks `X-Telegram-Bot-Api-Secret-Token` against `TELEGRAM_WEBHOOK_SECRET` (timing-safe, fails closed when unset), ignores every chat except `TELEGRAM_CHAT_ID`, and always returns 200 for valid updates so Telegram does not retry.
+
+One-time setup after deploying with `TELEGRAM_WEBHOOK_SECRET` set in Vercel:
+
+```bash
+# in the project folder, with TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET in .env.local (or the environment)
+npx tsx scripts/set-webhook.ts https://your-app.vercel.app
+```
+
+It calls `setWebhook` (with the secret token, only `message` and `callback_query` updates) and `setMyCommands` (the `/` menu). Run it again if the app URL or the secret changes. Generate the secret with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
 
 **Twelve Data credits.** Every scan that gets past the free checks uses 3 requests (one per timeframe), exactly like one analysis. Day mode every 15 minutes is 96 scans a day (288 requests) and swing hourly is 24 scans a day (72 requests), so at most about 360 requests per weekday if nothing is skipped. The free Basic plan allows 8 requests a minute and 800 a day, so the schedule above fits, but running the app manually at the same time can hit the per-minute limit; the :05 swing scan never overlaps a :00/:15/:30/:45 day scan. Weekend and out-of-session scans cost nothing. Use `ALERT_SESSIONS_ONLY=true` to cut usage further. Each alert also costs one AI call.
 
@@ -137,7 +181,8 @@ Tests are pure (no network): `tests/helpers.ts` builds candles from closes or hi
 - `lib/data/` — Twelve Data / FRED / calendar clients
 - `lib/ai/` — provider abstraction + prompt
 - `lib/signal/` — `facts.ts`, `gates.ts`, `levels.ts`, `parse.ts`, `validate.ts`, `service.ts` (pipeline)
-- `lib/alerts/` — `rules.ts` (pure alert rules), `telegram.ts`, `store.ts` (Redis REST + in-memory fake), `scan.ts` (cron handler); `app/api/cron/scan/route.ts`
+- `lib/alerts/` — `rules.ts` (pure alert rules), `format.ts` (gamified messages), `telegram.ts`, `redis.ts` + `store.ts` (Redis REST + in-memory fake), `scan.ts` (cron handler), `webhook.ts` (Telegram commands); `app/api/cron/scan/route.ts`, `app/api/telegram/webhook/route.ts`
+- `lib/calls/` — `types.ts`, `tracker.ts` (pure lifecycle), `stats.ts` (pure scoreboard), `store.ts`, `run.ts` (tracker run); `scripts/set-webhook.ts`
 - `lib/smc/` — `config.ts`, `range.ts`, `structure.ts`, `sweep.ts`, `fvg.ts`, `sma.ts`, `index.ts`, `filter.ts` (SMC-lite, pure, no I/O)
 - `lib/history.ts` / `lib/historyStore.ts` / `components/HistoryPanel.tsx` — browser history
 - `components/` — `SignalApp.tsx`, `ResultCard.tsx`, `StructureChecks.tsx`, `SnapshotDetails.tsx`, etc.

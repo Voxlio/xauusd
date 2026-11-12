@@ -125,6 +125,10 @@ export interface AlertConfig {
   cronSecret: string | null;
   telegramToken: string | null;
   telegramChatId: string | null;
+  /** Secret Telegram sends back in X-Telegram-Bot-Api-Secret-Token; when null the webhook rejects everything. */
+  webhookSecret: string | null;
+  /** Closed calls per page for /history. */
+  historyPageSize: number;
   minConfidence: number;
   cooldownHours: number;
   sessionsOnly: boolean;
@@ -158,8 +162,14 @@ export function readAlertConfig(env: Env = process.env): AlertConfig {
   if (chatId !== null && !/^-?\d{1,20}$|^@[A-Za-z0-9_]{4,64}$/.test(chatId)) {
     throw new AppError(500, "CONFIG_INVALID", "TELEGRAM_CHAT_ID must be a numeric chat id or an @channelname.", ENV_HINT);
   }
+  const webhookSecret = value(env, "TELEGRAM_WEBHOOK_SECRET");
+  if (webhookSecret !== null && !/^[A-Za-z0-9_-]{16,256}$/.test(webhookSecret)) {
+    throw new AppError(500, "CONFIG_INVALID", "TELEGRAM_WEBHOOK_SECRET must be 16-256 characters of A-Z, a-z, 0-9, _ or -.", ENV_HINT);
+  }
   return {
     cronSecret: value(env, "CRON_SECRET"),
+    webhookSecret,
+    historyPageSize: integer(env, "CALLS_HISTORY_PAGE_SIZE", 5, 1, 10),
     telegramToken: value(env, "TELEGRAM_BOT_TOKEN"),
     telegramChatId: chatId,
     minConfidence: integer(env, "ALERT_MIN_CONFIDENCE", 60, 0, 100),

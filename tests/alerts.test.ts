@@ -1,9 +1,9 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { readAlertConfig } from "../lib/server/env";
 import { evaluateAlert, isAlertSession, trendVotesFullyMixed, type AlertInput } from "../lib/alerts/rules";
 import { createMemoryStore, createRedisStore } from "../lib/alerts/store";
-import { escapeHtml, formatAlertMessage, sendTelegramMessage, TelegramError } from "../lib/alerts/telegram";
-import type { ValidatedSignal } from "../lib/types";
+import { answerCallbackQuery, editMessageText, sendTelegramMessage, TELEGRAM_MAX_TEXT, TelegramError } from "../lib/alerts/telegram";
 import { jsonResponse, scriptedFetch } from "./fakes";
 
 // Fri 2026-10-16 10:05 UTC (London session) and Sat 2026-10-17 10:05 UTC.
@@ -84,69 +84,6 @@ describe("evaluateAlert", () => {
   });
 });
 
-function fullSignal(overrides: Partial<ValidatedSignal> = {}): ValidatedSignal {
-  return {
-    bias: "BUY",
-    confidence: 72,
-    entry: 2400,
-    entryType: "limit",
-    stopLoss: 2390.5,
-    takeProfit1: 2415,
-    takeProfit2: 2425,
-    riskReward1: 1.6,
-    riskReward2: 2.6,
-    riskUsd: 9.5,
-    stopAtr: 1.2,
-    technicalReasons: ["H4 uptrend", "H1 pullback to EMA 50", "RSI 48 resets", "fourth reason is dropped"],
-    fundamentalReasons: [],
-    invalidation: "Close below 2,390 on H1",
-    newsWarning: null,
-    aiNewsNote: null,
-    noTradeReasons: [],
-    corrections: [],
-    warnings: [],
-    decidedBy: "ai",
-    smcVerdict: "agree",
-    ...overrides,
-  };
-}
-
-describe("Telegram message", () => {
-  test("escapes HTML", () => {
-    assert.equal(escapeHtml("a < b & c > d"), "a &lt; b &amp; c &gt; d");
-  });
-
-  test("formats the trade, reasons, validity and disclaimer", () => {
-    const text = formatAlertMessage(fullSignal(), "day", FRI);
-    assert.match(text, /<b>XAU\/USD BUY \(Day\)<\/b>/);
-    assert.match(text, /Entry \(limit\): <b>2,400\.00<\/b>/);
-    assert.match(text, /Stop loss: 2,390\.50/);
-    assert.match(text, /TP1: 2,415\.00 \(1\.6R\)/);
-    assert.match(text, /TP2: 2,425\.00 \(2\.6R\)/);
-    assert.match(text, /Confidence: 72\/100/);
-    assert.match(text, /SMC: agree/);
-    assert.match(text, /- H4 uptrend/);
-    assert.match(text, /- RSI 48 resets/);
-    assert.ok(!text.includes("fourth reason"));
-    assert.match(text, /Invalidation:<\/b> Close below 2,390 on H1/);
-    assert.match(text, /Valid until Fri 16 Oct 10:35 UTC/);
-    assert.match(text, /Demo account only\. Not financial advice\./);
-    assert.ok(!text.includes("News:"));
-  });
-
-  test("swing alerts are valid for 4 hours and dynamic text is escaped", () => {
-    const text = formatAlertMessage(
-      fullSignal({ technicalReasons: ["<script>alert(1)</script> & more"], newsWarning: "CPI <5m & NFP" }),
-      "swing",
-      FRI,
-    );
-    assert.match(text, /Valid until Fri 16 Oct 14:05 UTC/);
-    assert.match(text, /&lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; more/);
-    assert.match(text, /News:<\/b> CPI &lt;5m &amp; NFP/);
-    assert.ok(!text.includes("<script>"));
-  });
-});
-
 describe("sendTelegramMessage", () => {
   test("posts an HTML message to the bot API", async () => {
     const { fetchImpl, calls } = scriptedFetch([["api.telegram.org", () => jsonResponse({ ok: true })]]);
@@ -170,6 +107,33 @@ describe("sendTelegramMessage", () => {
     );
   });
 
+  test("sends an inline keyboard and trims text to the 4096 limit", async () => {
+    const { fetchImpl, calls } = scriptedFetch([["api.telegram.org", () => jsonResponse({ ok: true })]]);
+    const keyboard = { inline_keyboard: [[{ text: "Calls", callback_data: "calls" }]] };
+    await sendTelegramMessage({ token: "123:secret", chatId: "42", text: `${"line\n".repeat(2000)}end`, fetchImpl, replyMarkup: keyboard });
+    const body = JSON.parse(String(calls[0].init?.body)) as { text: string; reply_markup: unknown };
+    assert.ok(body.text.length <= TELEGRAM_MAX_TEXT);
+    assert.deepEqual(body.reply_markup, keyboard);
+  });
+
+  test("editMessageText and answerCallbackQuery call the right methods", async () => {
+    const { fetchImpl, calls } = scriptedFetch([["api.telegram.org", () => jsonResponse({ ok: true, result: true })]]);
+    await editMessageText({ token: "123:secret", chatId: "42", messageId: 7, text: "new", fetchImpl });
+    await answerCallbackQuery({ token: "123:secret", callbackQueryId: "cb1", fetchImpl });
+    assert.match(calls[0].url, /\/editMessageText$/);
+    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { chat_id: "42", message_id: 7, text: "new", parse_mode: "HTML", disable_web_page_preview: true });
+    assert.match(calls[1].url, /\/answerCallbackQuery$/);
+    assert.deepEqual(JSON.parse(String(calls[1].init?.body)), { callback_query_id: "cb1" });
+  });
+
+  test("keeps Telegram's description on the error for callers (not modified)", async () => {
+    const { fetchImpl } = scriptedFetch([["api.telegram.org", () => jsonResponse({ ok: false, description: "Bad Request: message is not modified" }, 400)]]);
+    await assert.rejects(
+      editMessageText({ token: "123:secret", chatId: "42", messageId: 7, text: "same", fetchImpl }),
+      (e: unknown) => e instanceof TelegramError && /not modified/.test(e.description ?? "") && !e.message.includes("secret"),
+    );
+  });
+
   test("times out on a hung request", async () => {
     const hung = (_url: string, init?: RequestInit) =>
       new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
@@ -177,6 +141,20 @@ describe("sendTelegramMessage", () => {
       sendTelegramMessage({ token: "t:t", chatId: "1", text: "x", fetchImpl: hung, timeoutMs: 20 }),
       (e: unknown) => e instanceof TelegramError && /in time/.test(e.message),
     );
+  });
+});
+
+describe("readAlertConfig", () => {
+  test("webhook secret and history page size are validated", () => {
+    assert.equal(readAlertConfig({}).webhookSecret, null);
+    assert.equal(readAlertConfig({}).historyPageSize, 5);
+    const ok = readAlertConfig({ TELEGRAM_WEBHOOK_SECRET: "a-valid_secret-0123456789", CALLS_HISTORY_PAGE_SIZE: "8" });
+    assert.equal(ok.webhookSecret, "a-valid_secret-0123456789");
+    assert.equal(ok.historyPageSize, 8);
+    assert.throws(() => readAlertConfig({ TELEGRAM_WEBHOOK_SECRET: "short" }), /TELEGRAM_WEBHOOK_SECRET/);
+    assert.throws(() => readAlertConfig({ TELEGRAM_WEBHOOK_SECRET: "has spaces and !!! chars 123456" }), /TELEGRAM_WEBHOOK_SECRET/);
+    assert.throws(() => readAlertConfig({ CALLS_HISTORY_PAGE_SIZE: "0" }), /CALLS_HISTORY_PAGE_SIZE/);
+    assert.throws(() => readAlertConfig({ CALLS_HISTORY_PAGE_SIZE: "11" }), /CALLS_HISTORY_PAGE_SIZE/);
   });
 });
 
